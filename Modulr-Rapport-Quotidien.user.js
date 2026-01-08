@@ -789,6 +789,10 @@
                         const emailDate = dateMatch ? dateMatch[1] : '';
                         const emailDateObj = Utils.parseDate(emailDate);
 
+                        // Extraire l'heure au format HH:MM
+                        const timeMatch = dateText.match(/(\d{1,2}):(\d{2})/);
+                        const emailTime = timeMatch ? `${timeMatch[1].padStart(2, '0')}:${timeMatch[2]}` : '';
+
                         Utils.log(`Email date: "${emailDate}", reportDate: "${reportDate}"`);
 
                         // Comparer les dates
@@ -833,6 +837,7 @@
                                 results.push({
                                     id: emailId,
                                     date: dateText,
+                                    time: emailTime,
                                     toEmail: toEmail,
                                     subject: subject,
                                     body: body,
@@ -937,445 +942,317 @@
     // COLLECTEUR D'EMAILS AFFECTÉS
     // ============================================
     // Parcourt les emails traités et cherche ceux affectés par l'utilisateur à la DATE DU RAPPORT
-// ============================================
-// COLLECTEUR D'EMAILS AFFECTÉS - VERSION CORRIGÉE V2
-// ============================================
-// Logique identique à l'original :
-// - Scanner les emails sur une période large
-// - Filtrer par date d'AFFECTATION = date du rapport
-// - Filtrer par utilisateur connecté
-//
-// Corrections apportées :
-// - Meilleur parsing HTML pour trouver l'info d'affectation
-// - Logs verbeux pour debug
-// ============================================
-
-const EmailsAffectedCollector = {
-    async collect(connectedUser, updateLoader) {
-        Utils.log('');
-        Utils.log('╔══════════════════════════════════════════════════════════════╗');
-        Utils.log('║         COLLECTE EMAILS AFFECTÉS - DEBUG MODE               ║');
-        Utils.log('╚══════════════════════════════════════════════════════════════╝');
-        Utils.log(`Utilisateur connecté: "${connectedUser}"`);
-
-        const results = [];
-        const reportDate = Utils.getTodayDate(); // Date du rapport demandé
-        Utils.log(`Date du rapport: ${reportDate}`);
-        Utils.log('→ On cherche les emails AFFECTÉS à cette date (peu importe leur date de réception)');
-        Utils.log('');
-
-        let currentPage = 1;
-        let hasMorePages = true;
-        let pagesWithoutMatch = 0;
-        const MAX_PAGES_WITHOUT_MATCH = 5;
-
-        // Statistiques
-        let stats = {
-            totalEmailsScanned: 0,
-            emailsWithAffectation: 0,
-            emailsMatchingDate: 0,
-            emailsMatchingUser: 0,
-            emailsCollected: 0,
-            rejectedByDate: [],
-            rejectedByUser: []
-        };
-
-        try {
-            while (hasMorePages && currentPage <= CONFIG.MAX_PAGES_TO_CHECK) {
-                updateLoader(`Emails affectés - Page ${currentPage}...`);
-
-                // URL avec le filtre "Voir les emails traités"
-                const url = `https://courtage.modulr.fr/fr/scripts/emails/emails_list.php?email_page=${currentPage}&emails_filters%5Bshow_associated_emails%5D=1`;
-
-                Utils.log(`\n━━━ PAGE ${currentPage} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-                Utils.log(`URL: ${url}`);
-
-                const html = await Utils.fetchPage(url);
-                const doc = Utils.parseHTML(html);
-
-                // DEBUG: Vérifier que le HTML est bien reçu
-                if (currentPage === 1) {
-                    Utils.log(`HTML reçu: ${html.length} caractères`);
-                    // Chercher combien de tr e_main_ dans le HTML brut
-                    const rawMatches = html.match(/id="e_main_\d+"/g);
-                    Utils.log(`Emails trouvés dans HTML brut: ${rawMatches ? rawMatches.length : 0}`);
-                }
-
-                // Chercher les lignes d'emails
-                const emailRows = doc.querySelectorAll('tr[id^="e_main_"]');
-                Utils.log(`Lignes d'emails trouvées: ${emailRows.length}`);
-
-                if (emailRows.length === 0) {
-                    Utils.log('⚠ Aucune ligne trouvée, fin de la pagination');
-                    break;
-                }
-
-                let foundMatchOnPage = false;
-
-                for (const row of emailRows) {
-                    stats.totalEmailsScanned++;
-                    const emailId = row.id.replace('e_main_', '');
-
-                    // ============================================
-                    // ÉTAPE 1: RÉCUPÉRER LA DATE/HEURE DE RÉCEPTION
-                    // ============================================
-                    const dateTimeSpan = row.querySelector('span[id^="e_datetime_"]');
-                    let emailReceivedDate = '';
-                    let emailTime = '';
-                    if (dateTimeSpan) {
-                        const dtText = dateTimeSpan.textContent.trim();
-                        const dateMatch = dtText.match(/(\d{2}\/\d{2}\/\d{4})/);
-                        if (dateMatch) emailReceivedDate = dateMatch[1];
-                        const timeMatch = dtText.match(/(\d{1,2}:\d{2})/);
-                        if (timeMatch) emailTime = timeMatch[1];
-                    }
-
-                    // ============================================
-                    // ÉTAPE 2: RECHERCHE INFO D'AFFECTATION
-                    // ============================================
-                    let affectedTo = '';
-                    let affectedDate = '';
-                    let affectedBy = '';
-                    let methodUsed = '';
-
-                    // MÉTHODE 1: Chercher dans les span.hidden
-                    const hiddenSpans = row.querySelectorAll('span.hidden');
-                    for (const span of hiddenSpans) {
-                        const txt = span.textContent || '';
-                        // Pattern: "Affecté à X par Y le DD/MM/YYYY"
-                        const match = txt.match(/Affecté\s+à\s+(.+?)\s+par\s+(.+?)\s+le\s+(\d{2}\/\d{2}\/\d{4})/i);
-                        if (match) {
-                            affectedTo = match[1].trim();
-                            affectedBy = match[2].trim();
-                            affectedDate = match[3];
-                            methodUsed = 'span.hidden';
-                            break;
-                        }
-                    }
-
-                    // MÉTHODE 2: Chercher dans les attributs title/data-original-title
-                    if (!affectedBy) {
-                        const elementsWithTitle = row.querySelectorAll('[title], [data-original-title], [oldtitle]');
-                        for (const elem of elementsWithTitle) {
-                            const titleText = elem.getAttribute('title') ||
-                                            elem.getAttribute('data-original-title') ||
-                                            elem.getAttribute('oldtitle') || '';
-                            const match = titleText.match(/Affecté\s+à\s+(.+?)\s+par\s+(.+?)\s+le\s+(\d{2}\/\d{2}\/\d{4})/i);
-                            if (match) {
-                                affectedTo = match[1].trim();
-                                affectedBy = match[2].trim();
-                                affectedDate = match[3];
-                                methodUsed = 'attribut title';
-                                break;
-                            }
-                        }
-                    }
-
-                    // MÉTHODE 3: Chercher dans tout le innerHTML de la ligne
-                    if (!affectedBy) {
-                        const rowHtml = row.innerHTML;
-                        // Pattern plus flexible pour capturer même avec des espaces multiples ou balises
-                        const match = rowHtml.match(/Affecté\s+à\s+([^<]+?)\s+par\s+([^<]+?)\s+le\s+(\d{2}\/\d{2}\/\d{4})/i);
-                        if (match) {
-                            affectedTo = match[1].trim();
-                            affectedBy = match[2].trim();
-                            affectedDate = match[3];
-                            methodUsed = 'innerHTML';
-                        }
-                    }
-
-                    // MÉTHODE 4: Chercher dans outerHTML (inclut la balise tr elle-même)
-                    if (!affectedBy) {
-                        const outerHtml = row.outerHTML;
-                        const match = outerHtml.match(/Affecté\s+à\s+([^<]+?)\s+par\s+([^<]+?)\s+le\s+(\d{2}\/\d{2}\/\d{4})/i);
-                        if (match) {
-                            affectedTo = match[1].trim();
-                            affectedBy = match[2].trim();
-                            affectedDate = match[3];
-                            methodUsed = 'outerHTML';
-                        }
-                    }
-
-                    // ============================================
-                    // ÉTAPE 3: PAS D'AFFECTATION = SKIP
-                    // ============================================
-                    if (!affectedBy) {
-                        // Pas de log pour les emails sans affectation (trop verbeux)
-                        continue;
-                    }
-
-                    stats.emailsWithAffectation++;
-                    Utils.log(`\n📧 Email #${emailId} (reçu le ${emailReceivedDate})`);
-                    Utils.log(`   → Affecté à "${affectedTo}" par "${affectedBy}" le ${affectedDate}`);
-                    Utils.log(`   → Méthode de détection: ${methodUsed}`);
-
-                    // ============================================
-                    // ÉTAPE 4: VÉRIFICATION DE LA DATE D'AFFECTATION
-                    // ============================================
-                    if (affectedDate !== reportDate) {
-                        Utils.log(`   ❌ Date ${affectedDate} ≠ rapport ${reportDate} → IGNORÉ`);
-                        stats.rejectedByDate.push({
-                            id: emailId,
-                            affectedDate: affectedDate,
-                            expectedDate: reportDate
-                        });
-                        continue;
-                    }
-
-                    stats.emailsMatchingDate++;
-                    Utils.log(`   ✓ Date OK (${affectedDate})`);
-
-                    // ============================================
-                    // ÉTAPE 5: VÉRIFICATION DE L'UTILISATEUR
-                    // ============================================
-                    const userLower = connectedUser.toLowerCase().trim();
-                    const byLower = affectedBy.toLowerCase().trim();
-
-                    let isMatch = false;
-                    let matchType = '';
-
-                    // Match exact
-                    if (byLower === userLower) {
-                        isMatch = true;
-                        matchType = 'exact';
-                    }
-
-                    // Match partiel (l'un contient l'autre)
-                    if (!isMatch && (byLower.includes(userLower) || userLower.includes(byLower))) {
-                        isMatch = true;
-                        matchType = 'includes';
-                    }
-
-                    // Match par parties du nom (prénom OU nom)
-                    if (!isMatch) {
-                        const byParts = byLower.split(/[\s,]+/).filter(p => p.length > 2);
-                        const userParts = userLower.split(/[\s,]+/).filter(p => p.length > 2);
-
-                        for (const bp of byParts) {
-                            if (userParts.some(up => up === bp || up.includes(bp) || bp.includes(up))) {
-                                isMatch = true;
-                                matchType = `partie "${bp}"`;
-                                break;
-                            }
-                        }
-                    }
-
-                    if (!isMatch) {
-                        Utils.log(`   ❌ Utilisateur "${affectedBy}" ≠ "${connectedUser}" → IGNORÉ`);
-                        stats.rejectedByUser.push({
-                            id: emailId,
-                            affectedBy: affectedBy,
-                            expectedUser: connectedUser
-                        });
-                        continue;
-                    }
-
-                    stats.emailsMatchingUser++;
-                    Utils.log(`   ✓ Utilisateur OK (match ${matchType})`);
-
-                    // ============================================
-                    // ÉTAPE 6: COLLECTE DES DONNÉES
-                    // ============================================
-                    foundMatchOnPage = true;
-
-                    // Expéditeur
-                    const fromSpan = row.querySelector('span[id^="e_from_"]');
-                    const fromText = fromSpan ? fromSpan.textContent.trim() : 'N/A';
-
-                    // Email de l'expéditeur
-                    const emailInput = row.querySelector('input.association_email_email');
-                    const fromEmail = emailInput ? emailInput.value : '';
-
-                    // Objet de l'email
-                    let subject = 'N/A';
-                    const detailsRow = doc.querySelector(`#e_details_${emailId}`);
-                    if (detailsRow) {
-                        const subjectTd = detailsRow.querySelector('td[id^="e_subject_"]');
-                        if (subjectTd) {
-                            const subjectClone = subjectTd.cloneNode(true);
-                            subjectClone.querySelectorAll('input').forEach(i => i.remove());
-                            subject = subjectClone.textContent.trim();
-                        }
-                    }
-
-                    // Fallback
-                    if (subject === 'N/A') {
-                        const subjectInput = row.querySelector('input.association_email_subject');
-                        if (subjectInput) subject = subjectInput.value || 'N/A';
-                    }
-
-                    // Vérifier doublon
-                    if (!results.find(r => r.id === emailId)) {
-                        results.push({
-                            id: emailId,
-                            date: affectedDate,
-                            receivedDate: emailReceivedDate,
-                            time: emailTime,
-                            from: fromText,
-                            fromEmail: fromEmail,
-                            subject: subject,
-                            affectedTo: affectedTo,
-                            affectedBy: affectedBy,
-                            hasAttachment: !!row.querySelector('.fa-paperclip')
-                        });
-
-                        stats.emailsCollected++;
-                        Utils.log(`   ✅ COLLECTÉ: "${subject.substring(0, 50)}..."`);
-                    }
-                }
-
-                // ============================================
-                // LOGIQUE DE PAGINATION
-                // ============================================
-                if (foundMatchOnPage) {
-                    pagesWithoutMatch = 0;
-                } else {
-                    pagesWithoutMatch++;
-                    Utils.log(`\nPage ${currentPage}: Aucun email affecté le ${reportDate} par ${connectedUser}`);
-                    Utils.log(`Pages sans match: ${pagesWithoutMatch}/${MAX_PAGES_WITHOUT_MATCH}`);
-                }
-
-                if (pagesWithoutMatch >= MAX_PAGES_WITHOUT_MATCH) {
-                    Utils.log(`\n⚠ Arrêt après ${MAX_PAGES_WITHOUT_MATCH} pages consécutives sans match`);
-                    break;
-                }
-
-                // Page suivante ?
-                const nextPageLink = doc.querySelector(`a[href*="email_page=${currentPage + 1}"]`);
-                if (nextPageLink) {
-                    currentPage++;
-                    await Utils.delay(CONFIG.DELAY_BETWEEN_REQUESTS);
-                } else {
-                    hasMorePages = false;
-                    Utils.log('\nPlus de pages disponibles');
-                }
-            }
-
-            // ============================================
-            // RÉSUMÉ FINAL
-            // ============================================
-            Utils.log('');
-            Utils.log('╔══════════════════════════════════════════════════════════════╗');
-            Utils.log('║                      RÉSUMÉ COLLECTE                        ║');
-            Utils.log('╚══════════════════════════════════════════════════════════════╝');
-            Utils.log(`📊 Emails scannés:              ${stats.totalEmailsScanned}`);
-            Utils.log(`📋 Avec info d'affectation:     ${stats.emailsWithAffectation}`);
-            Utils.log(`📅 Matching date ${reportDate}:   ${stats.emailsMatchingDate}`);
-            Utils.log(`👤 Matching utilisateur:        ${stats.emailsMatchingUser}`);
-            Utils.log(`✅ COLLECTÉS:                   ${stats.emailsCollected}`);
-            Utils.log('');
-
-            if (stats.rejectedByDate.length > 0 && stats.rejectedByDate.length <= 10) {
-                Utils.log('Rejetés par date (max 10):');
-                stats.rejectedByDate.slice(0, 10).forEach(e => {
-                    Utils.log(`  - Email #${e.id}: affecté le ${e.affectedDate} (attendu: ${e.expectedDate})`);
-                });
-            }
-
-            if (stats.rejectedByUser.length > 0 && stats.rejectedByUser.length <= 10) {
-                Utils.log('Rejetés par utilisateur (max 10):');
-                stats.rejectedByUser.slice(0, 10).forEach(e => {
-                    Utils.log(`  - Email #${e.id}: par "${e.affectedBy}" (attendu: "${e.expectedUser}")`);
-                });
-            }
-
-        } catch (error) {
-            Utils.log('❌ ERREUR collecte emails affectés:', error);
-            console.error('Erreur détaillée:', error);
-        }
-
-        return results;
-    }
-};
-
-    // ============================================
-    // COLLECTEUR NOMBRE D'EMAILS EN ATTENTE
-    // ============================================
-    // Compte les emails assignés à l'utilisateur (bouton avec son nom)
-    // qui ne sont pas encore traités (pas de filtre show_associated_emails)
-    const PendingEmailsCollector = {
+    // Un email peut être reçu il y a plusieurs jours mais affecté aujourd'hui
+    const EmailsAffectedCollector = {
         async collect(connectedUser, updateLoader) {
-            Utils.log('=== COLLECTE EMAILS EN ATTENTE ===');
-            Utils.log('Utilisateur recherché:', connectedUser);
+            Utils.log('=== COLLECTE EMAILS AFFECTÉS ===');
+            Utils.log('Utilisateur connecté:', connectedUser);
+            const results = [];
+            const reportDate = Utils.getTodayDate(); // Date du rapport
+
+            Utils.log('Date du rapport:', reportDate);
+
+            let currentPage = 1;
+            let hasMorePages = true;
+            let pagesWithoutMatch = 0; // Compteur de pages consécutives sans match
+            const MAX_PAGES_WITHOUT_MATCH = 3; // Arrêter après 3 pages sans match
 
             try {
-                updateLoader('Comptage emails en attente...');
+                while (hasMorePages && currentPage <= CONFIG.MAX_PAGES_TO_CHECK) {
+                    updateLoader(`Emails affectés - Page ${currentPage}...`);
 
-                const userLower = connectedUser.toLowerCase().trim();
-                const userParts = userLower.split(/[\s,]+/).filter(p => p.length > 2);
-                let pendingCount = 0;
-                let currentPage = 1;
-                let hasMorePages = true;
-                const MAX_PAGES = 10; // Limite de sécurité
+                    // URL avec le filtre "Voir les emails traités" activé
+                    const url = `https://courtage.modulr.fr/fr/scripts/emails/emails_list.php?email_page=${currentPage}&emails_filters%5Bshow_associated_emails%5D=1`;
 
-                while (hasMorePages && currentPage <= MAX_PAGES) {
-                    // Charger la page des emails NON traités (sans le filtre show_associated_emails)
-                    const url = `https://courtage.modulr.fr/fr/scripts/emails/emails_list.php?email_page=${currentPage}`;
-                    Utils.log(`Page ${currentPage}: ${url}`);
+                    Utils.log(`GET emails page ${currentPage}: ${url}`);
 
                     const html = await Utils.fetchPage(url);
                     const doc = Utils.parseHTML(html);
 
                     // Chercher les lignes d'emails
                     const emailRows = doc.querySelectorAll('tr[id^="e_main_"]');
-                    Utils.log(`Page ${currentPage}: ${emailRows.length} emails`);
+                    Utils.log(`Page ${currentPage}: ${emailRows.length} lignes d'emails`);
 
                     if (emailRows.length === 0) {
+                        Utils.log('Aucune ligne trouvée, fin');
                         break;
                     }
 
-                    let countThisPage = 0;
+                    let foundMatchOnPage = false;
+                    let oldestAffectDate = null;
 
                     for (const row of emailRows) {
-                        // Chercher le bouton d'affectation (contient le nom de l'utilisateur assigné)
-                        // Le bouton est dans un <a> ou <button> avec classe btn ou similaire
-                        const assignButton = row.querySelector('a.btn[href*="/emails/assign/"], button.btn, .btn-group .btn');
+                        const emailId = row.id.replace('e_main_', '');
 
-                        if (assignButton) {
-                            const buttonText = assignButton.textContent.trim().toLowerCase();
+                        // Récupérer la date/heure de réception
+                        const dateTimeSpan = row.querySelector('span[id^="e_datetime_"]');
+                        let emailReceivedDate = '';
+                        let emailTime = '';
+                        if (dateTimeSpan) {
+                            const dtText = dateTimeSpan.textContent.trim();
+                            const dateMatch = dtText.match(/(\d{2}\/\d{2}\/\d{4})/);
+                            if (dateMatch) emailReceivedDate = dateMatch[1];
+                            const timeMatch = dtText.match(/(\d{1,2}:\d{2})/);
+                            if (timeMatch) emailTime = timeMatch[1];
+                        }
 
-                            // Vérifier si le bouton contient le nom de l'utilisateur
-                            let isAssignedToUser = false;
+                        // Chercher l'info d'affectation dans PLUSIEURS endroits
+                        let affectedTo = '';
+                        let affectedDate = '';
+                        let affectedBy = '';
 
-                            // Match exact
-                            if (buttonText.includes(userLower)) {
-                                isAssignedToUser = true;
+                        // MÉTHODE 1: span.hidden
+                        const hiddenSpans = row.querySelectorAll('span.hidden');
+                        for (const span of hiddenSpans) {
+                            const txt = span.textContent || '';
+                            // Regex plus souple : "Affecté à XXX par YYY le DD/MM/YYYY"
+                            const match = txt.match(/Affecté\s+à\s+(.+?)\s+par\s+(.+?)\s+le\s+(\d{2}\/\d{2}\/\d{4})/i);
+                            if (match) {
+                                affectedTo = match[1].trim();
+                                affectedBy = match[2].trim();
+                                affectedDate = match[3];
+                                Utils.log(`  Email ${emailId}: [span.hidden] Affecté à "${affectedTo}" par "${affectedBy}" le ${affectedDate}`);
+                                break;
                             }
+                        }
 
+                        // MÉTHODE 2: Attributs title, oldtitle, data-original-title sur tous les éléments
+                        if (!affectedBy) {
+                            const elementsWithTitle = row.querySelectorAll('[title], [oldtitle], [data-original-title]');
+                            for (const elem of elementsWithTitle) {
+                                const titleText = elem.getAttribute('title') ||
+                                                elem.getAttribute('oldtitle') ||
+                                                elem.getAttribute('data-original-title') || '';
+                                const match = titleText.match(/Affecté\s+à\s+(.+?)\s+par\s+(.+?)\s+le\s+(\d{2}\/\d{2}\/\d{4})/i);
+                                if (match) {
+                                    affectedTo = match[1].trim();
+                                    affectedBy = match[2].trim();
+                                    affectedDate = match[3];
+                                    Utils.log(`  Email ${emailId}: [title attr] Affecté à "${affectedTo}" par "${affectedBy}" le ${affectedDate}`);
+                                    break;
+                                }
+                            }
+                        }
+
+                        // MÉTHODE 3: Chercher dans tout le innerHTML
+                        if (!affectedBy) {
+                            const rowHtml = row.innerHTML;
+                            const match = rowHtml.match(/Affecté\s+à\s+([^<]+?)\s+par\s+([^<]+?)\s+le\s+(\d{2}\/\d{2}\/\d{4})/i);
+                            if (match) {
+                                affectedTo = match[1].trim();
+                                affectedBy = match[2].trim();
+                                affectedDate = match[3];
+                                Utils.log(`  Email ${emailId}: [innerHTML] Affecté à "${affectedTo}" par "${affectedBy}" le ${affectedDate}`);
+                            }
+                        }
+
+                        // Pas d'info d'affectation = email non traité sur cette page
+                        if (!affectedBy) {
+                            continue;
+                        }
+
+                        // Garder trace de la plus vieille date d'affectation
+                        if (affectedDate) {
+                            const affDateObj = Utils.parseDate(affectedDate);
+                            if (!oldestAffectDate || affDateObj < oldestAffectDate) {
+                                oldestAffectDate = affDateObj;
+                            }
+                        }
+
+                        // Vérifier si la date d'affectation = date du rapport
+                        if (affectedDate !== reportDate) {
+                            continue;
+                        }
+
+                        // Vérifier si affecté PAR l'utilisateur connecté
+                        const userLower = connectedUser.toLowerCase().trim();
+                        const byLower = affectedBy.toLowerCase().trim();
+
+                        let isMatch = (byLower === userLower);
+                        if (!isMatch) isMatch = byLower.includes(userLower) || userLower.includes(byLower);
+                        if (!isMatch) {
                             // Match par parties du nom
-                            if (!isAssignedToUser) {
-                                let matchedParts = 0;
-                                for (const up of userParts) {
-                                    if (buttonText.includes(up)) {
-                                        matchedParts++;
-                                    }
-                                }
-                                // Si au moins 1 partie du nom (prénom ou nom) est trouvée
-                                if (matchedParts > 0 && userParts.length > 0) {
-                                    isAssignedToUser = true;
+                            const byParts = byLower.split(/[\s,]+/).filter(p => p.length > 2);
+                            const userParts = userLower.split(/[\s,]+/).filter(p => p.length > 2);
+                            for (const bp of byParts) {
+                                if (userParts.some(up => up === bp)) {
+                                    isMatch = true;
+                                    break;
                                 }
                             }
+                        }
 
-                            if (isAssignedToUser) {
-                                countThisPage++;
-                            }
+                        if (!isMatch) {
+                            Utils.log(`    -> "${affectedBy}" != "${connectedUser}"`);
+                            continue;
+                        }
+
+                        // MATCH ! Collecter l'email
+                        foundMatchOnPage = true;
+
+                        const fromSpan = row.querySelector('span[id^="e_from_"]');
+                        const fromText = fromSpan ? fromSpan.textContent.trim() : 'N/A';
+
+                        const emailInput = row.querySelector('input.association_email_email');
+                        const fromEmail = emailInput ? emailInput.value : '';
+
+                        let subject = 'N/A';
+                        const detailsRow = doc.querySelector(`#e_details_${emailId}`);
+                        if (detailsRow) {
+                            const subjectTd = detailsRow.querySelector('td[id^="e_subject_"]');
+                            if (subjectTd) subject = subjectTd.textContent.trim();
+                        }
+                        if (subject === 'N/A') {
+                            const subjectInput = row.querySelector('input.association_email_subject');
+                            if (subjectInput) subject = subjectInput.value || 'N/A';
+                        }
+
+                        if (!results.find(r => r.id === emailId)) {
+                            results.push({
+                                id: emailId,
+                                date: affectedDate,
+                                receivedDate: emailReceivedDate,
+                                time: emailTime,
+                                from: fromText,
+                                fromEmail: fromEmail,
+                                subject: subject,
+                                affectedTo: affectedTo,
+                                hasAttachment: !!row.querySelector('.fa-paperclip')
+                            });
+
+                            Utils.log(`✓ COLLECTÉ: Email ${emailId} - "${subject.substring(0, 40)}..." affecté à ${affectedTo}`);
                         }
                     }
 
-                    Utils.log(`Page ${currentPage}: ${countThisPage} emails assignés à ${connectedUser}`);
-                    pendingCount += countThisPage;
+                    // Logique d'arrêt : si on trouve des dates d'affectation plus anciennes que le rapport
+                    // et qu'on n'a pas trouvé de match, on peut s'arrêter
+                    if (foundMatchOnPage) {
+                        pagesWithoutMatch = 0;
+                    } else {
+                        pagesWithoutMatch++;
+                        Utils.log(`  Page ${currentPage}: pas de match (${pagesWithoutMatch}/${MAX_PAGES_WITHOUT_MATCH})`);
+                    }
 
-                    // Vérifier s'il y a une page suivante
+                    // S'arrêter si trop de pages sans match
+                    if (pagesWithoutMatch >= MAX_PAGES_WITHOUT_MATCH) {
+                        Utils.log(`Arrêt après ${MAX_PAGES_WITHOUT_MATCH} pages sans match`);
+                        break;
+                    }
+
+                    // Vérifier pagination
                     const nextPageLink = doc.querySelector(`a[href*="email_page=${currentPage + 1}"]`);
-                    if (nextPageLink && emailRows.length >= 20) {
+                    if (nextPageLink) {
                         currentPage++;
-                        await Utils.delay(300);
+                        await Utils.delay(CONFIG.DELAY_BETWEEN_REQUESTS);
                     } else {
                         hasMorePages = false;
                     }
                 }
 
-                Utils.log(`=== RÉSULTAT: ${pendingCount} emails en attente pour ${connectedUser} ===`);
+                Utils.log(`=== RÉSULTAT: ${results.length} emails affectés par ${connectedUser} le ${reportDate} ===`);
+            } catch (error) {
+                Utils.log('Erreur collecte emails affectés:', error);
+                console.error('Erreur détaillée:', error);
+            }
+
+            return results;
+        }
+    };
+
+    // ============================================
+    // COLLECTEUR NOMBRE D'EMAILS EN ATTENTE
+    // ============================================
+    // Récupère le nombre d'emails assignés (en attente) pour l'utilisateur
+    // depuis la liste des utilisateurs dans le menu d'affectation
+    const PendingEmailsCollector = {
+        async collect(connectedUser, updateLoader) {
+            Utils.log('=== COLLECTE EMAILS EN ATTENTE ===');
+            Utils.log('Utilisateur recherché:', connectedUser);
+
+            try {
+                updateLoader('Récupération emails en attente...');
+
+                // Charger la page des emails SANS filtre (pour voir les non traités)
+                const url = 'https://courtage.modulr.fr/fr/scripts/emails/emails_list.php?email_page=1';
+                const html = await Utils.fetchPage(url);
+                const doc = Utils.parseHTML(html);
+
+                // Chercher dans les liens d'affectation le pattern "NOM (XX)"
+                // Le lien peut être /emails/assign/ ou /intranet/emails/assign/
+                const assignLinks = doc.querySelectorAll('a[href*="emails/assign"]');
+                Utils.log(`${assignLinks.length} liens d'affectation trouvés`);
+
+                const userLower = connectedUser.toLowerCase().trim();
+                const userParts = userLower.split(/[\s,]+/).filter(p => p.length > 2);
+                let pendingCount = 0;
+                let foundUser = false;
+
+                for (const link of assignLinks) {
+                    // Récupérer le texte en nettoyant les espaces et caractères spéciaux
+                    let text = link.textContent.trim();
+                    // Supprimer les espaces multiples et &nbsp;
+                    text = text.replace(/\s+/g, ' ').trim();
+
+                    Utils.log(`  Lien brut: "${text}"`);
+
+                    // Pattern: "Nom Prénom (XX)" - chercher le nombre entre parenthèses
+                    // Le nom peut contenir des espaces, donc on cherche tout avant les parenthèses
+                    const match = text.match(/^(.+?)\s*\((\d+)\)\s*$/);
+                    if (match) {
+                        const userName = match[1].trim();
+                        const count = parseInt(match[2]);
+                        const nameLower = userName.toLowerCase().trim();
+
+                        Utils.log(`    Parsé: nom="${userName}", count=${count}`);
+
+                        // Vérifier si c'est l'utilisateur connecté
+                        let isMatch = false;
+
+                        // Match exact
+                        if (nameLower === userLower) {
+                            isMatch = true;
+                            Utils.log(`    -> Match exact`);
+                        }
+                        // Match inclusion
+                        if (!isMatch && (nameLower.includes(userLower) || userLower.includes(nameLower))) {
+                            isMatch = true;
+                            Utils.log(`    -> Match inclusion`);
+                        }
+                        // Match par parties du nom (prénom OU nom)
+                        if (!isMatch) {
+                            const nameParts = nameLower.split(/[\s,]+/).filter(p => p.length > 2);
+                            let matchedParts = 0;
+                            for (const np of nameParts) {
+                                for (const up of userParts) {
+                                    if (np === up) {
+                                        matchedParts++;
+                                        break;
+                                    }
+                                }
+                            }
+                            // Si au moins une partie du nom correspond
+                            if (matchedParts > 0) {
+                                isMatch = true;
+                                Utils.log(`    -> Match par parties (${matchedParts} correspondances)`);
+                            }
+                        }
+
+                        if (isMatch) {
+                            pendingCount = count;
+                            foundUser = true;
+                            Utils.log(`✓ MATCH TROUVÉ: "${userName}" = ${pendingCount} emails en attente`);
+                            break; // Prendre le premier match
+                        }
+                    } else {
+                        Utils.log(`    -> Pas de pattern (XX) trouvé`);
+                    }
+                }
+
+                if (!foundUser) {
+                    Utils.log(`✗ Aucun match trouvé pour "${connectedUser}" parmi les ${assignLinks.length} liens`);
+                }
+
+                Utils.log(`=== RÉSULTAT: ${pendingCount} emails en attente ===`);
                 return pendingCount;
 
             } catch (error) {
@@ -1551,17 +1428,31 @@ const EmailsAffectedCollector = {
                             await Utils.delay(CONFIG.DELAY_BETWEEN_REQUESTS);
                         }
 
-                        // Parser les infos de création
+                        // Parser les infos de création et dernière modification
                         let createdBy = 'N/A', createdDate = 'N/A';
+                        let closedTime = ''; // Heure de clôture = dernière modification
+                        let closedBy = '';
                         const hiddenDiv = row.querySelector('.hidden');
                         if (hiddenDiv) {
                             const text = hiddenDiv.innerHTML;
+                            // Extraction création
                             const creationMatch = text.match(/Création<\/p>\s*<p[^>]*>([^<]+)/);
                             if (creationMatch) {
                                 const parts = creationMatch[1].trim().match(/(.+) (\d{2}\/\d{2}\/\d{4})/);
                                 if (parts) {
                                     createdBy = parts[1].trim();
                                     createdDate = parts[2];
+                                }
+                            }
+                            // Extraction dernière modification (= heure de clôture)
+                            const modifMatch = text.match(/Derni[èe]re modification<\/p>\s*<p[^>]*>([^<]+)/i);
+                            if (modifMatch) {
+                                // Format: "NOM PRENOM DD/MM/YYYY HH:MM:SS"
+                                const modifParts = modifMatch[1].trim().match(/(.+?)\s+(\d{2}\/\d{2}\/\d{4})\s+(\d{2}:\d{2})/);
+                                if (modifParts) {
+                                    closedBy = modifParts[1].trim();
+                                    closedTime = modifParts[3]; // HH:MM
+                                    Utils.log(`Tâche ${taskId}: Clôturée à ${closedTime} par ${closedBy}`);
                                 }
                             }
                         }
@@ -1574,6 +1465,9 @@ const EmailsAffectedCollector = {
                             clientId: clientLink ? (clientLink.href.match(/id=(\d+)/) || [])[1] : null,
                             assignedTo: connectedUser,
                             completedDate: completedDate,
+                            time: closedTime, // Heure de clôture pour la vue chronologique
+                            closedTime: closedTime,
+                            closedBy: closedBy,
                             createdBy,
                             createdDate,
                             isPriority: !!row.querySelector('.fa-exclamation'),
@@ -2906,7 +2800,7 @@ const EmailsAffectedCollector = {
                                                     <br><span style="color: #666; font-size: 12px;">Client: ${Utils.escapeHtml(t.client)}</span>
                                                 </div>
                                                 <span style="background: #f57c00; color: white; padding: 3px 10px; border-radius: 12px; font-size: 11px;">
-                                                    Terminée le ${t.completedDate}
+                                                    ${t.closedTime ? `⏰ ${t.closedTime}` : `Terminée le ${t.completedDate}`}
                                                 </span>
                                             </div>
                                             ${t.content ? `
@@ -3419,12 +3313,19 @@ const EmailsAffectedCollector = {
 
                 // Logs - regrouper par client si l'ID client est présent dans les changements
                 logs.forEach(l => {
+                    // Exclure les tables qui ne sont pas des clients
+                    const tableRawLower = (l.tableRaw || '').toLowerCase();
+                    if (tableRawLower.includes('utilisateur') || tableRawLower.includes('user') ||
+                        tableRawLower.includes('collaborateur') || tableRawLower.includes('employe')) {
+                        return; // Skip - pas un client
+                    }
+
                     // Chercher un ID client dans les changements ou dans la table
                     let clientId = l.clientId;
                     let clientName = l.entityName;
 
                     // Si c'est une table client, utiliser l'entityId
-                    if (l.tableRaw && l.tableRaw.toLowerCase().includes('client')) {
+                    if (l.tableRaw && tableRawLower.includes('client')) {
                         clientId = l.entityId;
                     }
 
@@ -3510,251 +3411,211 @@ const EmailsAffectedCollector = {
                     background: rgba(0,0,0,0.9);
                     z-index: 1000000;
                     overflow-y: auto;
-                    font-family: Arial, sans-serif;
+                    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
                 ">
                     <div style="
-                        max-width: 1200px;
+                        max-width: 1100px;
                         margin: 20px auto;
-                        background: white;
-                        border-radius: 10px;
-                        padding: 30px;
+                        background: #f5f5f5;
+                        border-radius: 15px;
+                        padding: 25px;
                         box-shadow: 0 10px 50px rgba(0,0,0,0.3);
                     ">
                         <!-- Header -->
-                        <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 3px solid #1565c0; padding-bottom: 20px; margin-bottom: 30px;">
+                        <div style="display: flex; justify-content: space-between; align-items: center; background: white; padding: 20px; border-radius: 12px; margin-bottom: 20px; box-shadow: 0 2px 8px rgba(0,0,0,0.05);">
                             <div>
-                                <h1 style="color: #1565c0; margin: 0; font-size: 24px;">👤 Vue par Client</h1>
-                                <p style="color: #666; margin: 5px 0 0 0; font-size: 16px;">
-                                    <strong>${user}</strong> - ${isPastDate ? `📅 ${date} <span style="background: #ff9800; color: white; padding: 2px 8px; border-radius: 3px; font-size: 12px; margin-left: 8px;">Rapport rétrospectif</span>` : date} • ${activeClients.length} clients concernés
+                                <h1 style="color: #1565c0; margin: 0; font-size: 22px; font-weight: 600;">👤 Vue par Client</h1>
+                                <p style="color: #666; margin: 5px 0 0 0; font-size: 14px;">
+                                    <strong>${user}</strong> • ${date} • ${activeClients.length} clients
                                 </p>
                             </div>
-                            <div>
-                                <button id="ltoa-back-to-categories" style="
-                                    background: #1565c0;
-                                    color: white;
-                                    border: none;
-                                    padding: 12px 20px;
-                                    border-radius: 5px;
-                                    cursor: pointer;
-                                    font-size: 13px;
-                                    margin-right: 8px;
-                                    font-weight: bold;
-                                ">📊 Retour Catégories</button>
-                                <button id="ltoa-close-client-view" style="
-                                    background: #666;
-                                    color: white;
-                                    border: none;
-                                    padding: 12px 20px;
-                                    border-radius: 5px;
-                                    cursor: pointer;
-                                    font-size: 13px;
-                                    font-weight: bold;
-                                ">✕ Fermer</button>
-                            </div>
+                            <button id="ltoa-close-client-view" style="
+                                background: linear-gradient(135deg, #666, #444);
+                                color: white;
+                                border: none;
+                                padding: 12px 24px;
+                                border-radius: 8px;
+                                cursor: pointer;
+                                font-size: 13px;
+                                font-weight: bold;
+                            ">✕ Fermer</button>
                         </div>
 
                         <!-- Liste des clients -->
-                        ${activeClients.length > 0 ? activeClients.map(client => {
-                            const totalActions = client.emailsSent.length + client.emailsAffected.length +
-                                               client.aircallCalls.length + client.tasksCompleted.length + client.tasksOverdue.length +
-                                               client.estimates.length + client.policies.length +
-                                               client.claims.length + client.logs.length;
-
+                        ${activeClients.length > 0 ? activeClients.map((client, clientIdx) => {
                             const clientLink = client.id ?
                                 `https://courtage.modulr.fr/fr/scripts/clients/clients_card.php?id=${client.id}` : '#';
-
-                            // Compter les logs par type
-                            const logsCreation = client.logs.filter(l => l.actionRaw && l.actionRaw.includes('Insertion')).length;
-                            const logsModification = client.logs.filter(l => l.actionRaw && l.actionRaw.includes('Mise à jour')).length;
-                            const logsSuppression = client.logs.filter(l => l.actionRaw && l.actionRaw.includes('Suppression')).length;
+                            const cuid = 'c' + clientIdx + '_' + Date.now();
 
                             return `
-                            <div style="background: white; border-radius: 16px; margin-bottom: 24px; overflow: hidden; box-shadow: 0 4px 20px rgba(0,0,0,0.08); border: 1px solid #e0e0e0;">
-
-                                <!-- En-tête client - MODERNISÉ -->
-                                <div style="background: linear-gradient(135deg, #1565c0 0%, #0d47a1 100%); color: white; padding: 20px 24px;">
-                                    <div style="display: flex; justify-content: space-between; align-items: center;">
-                                        <!-- Info client à gauche -->
+                            <div style="background: white; border-radius: 12px; margin-bottom: 20px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.08);">
+                                <!-- En-tête client avec gradient -->
+                                <div style="background: linear-gradient(135deg, #1565c0 0%, #0d47a1 100%); color: white; padding: 18px 22px;">
+                                    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
                                         <div>
-                                            <a href="${clientLink}" target="_blank" style="color: white; text-decoration: none; font-size: 22px; font-weight: bold; display: flex; align-items: center; gap: 12px;">
-                                                <span style="font-size: 28px;">👤</span>
-                                                ${Utils.escapeHtml(client.name)}
-                                                ${client.id ? `<span style="background: rgba(255,255,255,0.25); padding: 4px 12px; border-radius: 20px; font-size: 13px; font-weight: 600;">N° ${client.id}</span>` : ''}
+                                            <a href="${clientLink}" target="_blank" style="color: white; text-decoration: none; font-size: 18px; font-weight: 600;">
+                                                👤 ${Utils.escapeHtml(client.name)}
                                             </a>
-                                            ${client.email ? `<div style="opacity: 0.9; font-size: 14px; margin-top: 6px; margin-left: 40px;">📧 ${Utils.escapeHtml(client.email)}</div>` : ''}
+                                            ${client.id ? `<span style="background: rgba(255,255,255,0.2); padding: 3px 10px; border-radius: 12px; font-size: 11px; margin-left: 10px;">N° ${client.id}</span>` : ''}
+                                            ${client.email ? `<div style="opacity: 0.8; font-size: 12px; margin-top: 5px;">📧 ${Utils.escapeHtml(client.email)}</div>` : ''}
                                         </div>
-
-                                        <!-- Badges à droite - GROS ET MODERNES -->
-                                        <div style="display: flex; gap: 12px; flex-wrap: wrap; justify-content: flex-end;">
-                                            ${client.emailsSent.length > 0 ? `
-                                                <div style="background: rgba(255,255,255,0.95); color: #1976d2; padding: 10px 16px; border-radius: 12px; text-align: center; min-width: 50px;">
-                                                    <div style="font-size: 24px; font-weight: bold;">${client.emailsSent.length}</div>
-                                                    <div style="font-size: 11px; font-weight: 600; opacity: 0.8;">📤 Envoyé${client.emailsSent.length > 1 ? 's' : ''}</div>
-                                                </div>
-                                            ` : ''}
-                                            ${client.emailsAffected.length > 0 ? `
-                                                <div style="background: rgba(255,255,255,0.95); color: #388e3c; padding: 10px 16px; border-radius: 12px; text-align: center; min-width: 50px;">
-                                                    <div style="font-size: 24px; font-weight: bold;">${client.emailsAffected.length}</div>
-                                                    <div style="font-size: 11px; font-weight: 600; opacity: 0.8;">📥 Reçu${client.emailsAffected.length > 1 ? 's' : ''}</div>
-                                                </div>
-                                            ` : ''}
-                                            ${client.aircallCalls.length > 0 ? `
-                                                <div style="background: rgba(255,193,7,0.95); color: #e65100; padding: 10px 16px; border-radius: 12px; text-align: center; min-width: 50px;">
-                                                    <div style="font-size: 24px; font-weight: bold;">${client.aircallCalls.length}</div>
-                                                    <div style="font-size: 11px; font-weight: 600; opacity: 0.9;">📞 Appel${client.aircallCalls.length > 1 ? 's' : ''}</div>
-                                                </div>
-                                            ` : ''}
-                                            ${client.tasksCompleted.length > 0 ? `
-                                                <div style="background: rgba(255,255,255,0.95); color: #2e7d32; padding: 10px 16px; border-radius: 12px; text-align: center; min-width: 50px;">
-                                                    <div style="font-size: 24px; font-weight: bold;">${client.tasksCompleted.length}</div>
-                                                    <div style="font-size: 11px; font-weight: 600; opacity: 0.8;">✅ Tâche${client.tasksCompleted.length > 1 ? 's' : ''}</div>
-                                                </div>
-                                            ` : ''}
+                                        <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+                                            ${client.emailsSent.length > 0 ? `<span style="background: #2196f3; padding: 4px 12px; border-radius: 15px; font-size: 11px; font-weight: 500;">📤 ${client.emailsSent.length}</span>` : ''}
+                                            ${client.emailsAffected.length > 0 ? `<span style="background: #4caf50; padding: 4px 12px; border-radius: 15px; font-size: 11px; font-weight: 500;">📥 ${client.emailsAffected.length}</span>` : ''}
+                                            ${client.aircallCalls.length > 0 ? `<span style="background: #ff9800; padding: 4px 12px; border-radius: 15px; font-size: 11px; font-weight: 500;">📞 ${client.aircallCalls.length}</span>` : ''}
+                                            ${client.tasksCompleted.length > 0 ? `<span style="background: #ff5722; padding: 4px 12px; border-radius: 15px; font-size: 11px; font-weight: 500;">✅ ${client.tasksCompleted.length}</span>` : ''}
                                         </div>
                                     </div>
                                 </div>
 
-                                <!-- Contenu - SECTIONS AÉRÉES -->
-                                <div style="padding: 24px;">
+                                <!-- Contenu avec cartes colorées -->
+                                <div style="padding: 18px; display: grid; gap: 12px;">
 
-                                    <!-- APPELS TÉLÉPHONIQUES - SECTION MISE EN AVANT -->
-                                    ${client.aircallCalls.length > 0 ? `
-                                        <div style="margin-bottom: 20px;">
-                                            ${client.aircallCalls.map(call => {
-                                                const isOutgoing = call.type === 'sortant';
-                                                const bgColor = isOutgoing ? '#fff3e0' : '#e8f5e9';
-                                                const borderColor = isOutgoing ? '#ff9800' : '#4caf50';
-                                                const typeLabel = isOutgoing ? '📞 Appel sortant' : '📞 Appel entrant';
-                                                const moodIcon = call.mood === 'Positif' ? '😊' : (call.mood === 'Négatif' ? '😟' : (call.mood === 'Neutre' ? '😐' : ''));
-
-                                                return `
-                                                <div style="background: ${bgColor}; border-left: 5px solid ${borderColor}; border-radius: 0 12px 12px 0; padding: 16px 20px; margin-bottom: 12px;">
-                                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
-                                                        <div style="font-size: 16px; font-weight: bold; color: #333;">
-                                                            ${typeLabel} ${moodIcon}
-                                                        </div>
-                                                        <div style="display: flex; gap: 16px; align-items: center;">
-                                                            <span style="background: white; padding: 6px 14px; border-radius: 20px; font-weight: bold; color: #555;">
-                                                                ⏱️ ${call.duration || '0s'}
-                                                            </span>
-                                                            <span style="color: #666; font-size: 14px;">
-                                                                🕐 ${call.time || ''}
-                                                            </span>
-                                                        </div>
-                                                    </div>
-                                                    ${call.summary ? `
-                                                        <div style="background: white; border-radius: 8px; padding: 12px 16px; margin-top: 8px;">
-                                                            <div style="color: #555; font-size: 14px; line-height: 1.6;">
-                                                                💬 ${Utils.escapeHtml(call.summary)}
-                                                            </div>
-                                                        </div>
+                                    ${client.emailsSent.length > 0 ? `
+                                    <!-- Emails envoyés -->
+                                    <div style="background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #1976d2;">
+                                        <div style="font-weight: 600; color: #1565c0; margin-bottom: 10px; font-size: 14px;">📤 Emails envoyés (${client.emailsSent.length})</div>
+                                        ${client.emailsSent.map((e, eIdx) => `
+                                            <div style="background: white; border-radius: 6px; padding: 10px; margin-bottom: 6px;">
+                                                <div style="display: flex; justify-content: space-between;">
+                                                    <strong style="color: #333; font-size: 13px;">${Utils.escapeHtml(e.subject || 'Sans objet')}</strong>
+                                                    <span style="color: #1976d2; font-size: 11px; font-weight: 500;">${e.time || ''}</span>
+                                                </div>
+                                                ${e.body ? `
+                                                    <div id="email_short_${cuid}_${eIdx}" style="color: #666; font-size: 12px; margin-top: 6px; line-height: 1.4;">${Utils.escapeHtml(Utils.truncate(e.body, 150))}</div>
+                                                    ${e.body.length > 150 ? `
+                                                        <div id="email_full_${cuid}_${eIdx}" style="display: none; color: #666; font-size: 12px; margin-top: 6px; line-height: 1.4; white-space: pre-wrap;">${Utils.escapeHtml(e.body)}</div>
+                                                        <button onclick="var s=document.getElementById('email_short_${cuid}_${eIdx}');var f=document.getElementById('email_full_${cuid}_${eIdx}');if(f.style.display==='none'){f.style.display='block';s.style.display='none';this.textContent='▲ Réduire';}else{f.style.display='none';s.style.display='block';this.textContent='▼ Voir plus';}" style="background: #1976d2; color: white; border: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; margin-top: 6px;">▼ Voir plus</button>
                                                     ` : ''}
-                                                </div>
-                                                `;
-                                            }).join('')}
-                                        </div>
+                                                ` : ''}
+                                            </div>
+                                        `).join('')}
+                                    </div>
                                     ` : ''}
 
-                                    <!-- EMAILS - GRID MODERNE -->
-                                    ${(client.emailsSent.length > 0 || client.emailsAffected.length > 0) ? `
-                                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 20px;">
-                                            ${client.emailsSent.length > 0 ? `
-                                                <div style="background: #e3f2fd; border-radius: 12px; padding: 16px;">
-                                                    <div style="font-size: 14px; font-weight: bold; color: #1565c0; margin-bottom: 10px; display: flex; align-items: center; gap: 8px;">
-                                                        <span style="font-size: 20px;">📤</span> Emails envoyés
-                                                    </div>
-                                                    ${client.emailsSent.map(e => `
-                                                        <div style="background: white; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 13px;">
-                                                            <div style="color: #333; font-weight: 500;">${Utils.escapeHtml(e.subject || 'Sans objet')}</div>
-                                                            <div style="color: #999; font-size: 12px; margin-top: 4px;">📅 ${e.time || e.date || ''}</div>
-                                                        </div>
-                                                    `).join('')}
-                                                </div>
-                                            ` : ''}
-                                            ${client.emailsAffected.length > 0 ? `
-                                                <div style="background: #e8f5e9; border-radius: 12px; padding: 16px;">
-                                                    <div style="font-size: 14px; font-weight: bold; color: #2e7d32; margin-bottom: 10px; display: flex; align-items: center; gap: 8px;">
-                                                        <span style="font-size: 20px;">📥</span> Emails reçus/traités
-                                                    </div>
-                                                    ${client.emailsAffected.map(e => `
-                                                        <div style="background: white; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 13px;">
-                                                            <div style="color: #333; font-weight: 500;">${Utils.escapeHtml(e.subject || 'Sans objet')}</div>
-                                                            <div style="color: #999; font-size: 12px; margin-top: 4px;">📅 ${e.date || ''}</div>
-                                                        </div>
-                                                    `).join('')}
-                                                </div>
-                                            ` : ''}
-                                        </div>
+                                    ${client.emailsAffected.length > 0 ? `
+                                    <!-- Emails reçus -->
+                                    <div style="background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #388e3c;">
+                                        <div style="font-weight: 600; color: #2e7d32; margin-bottom: 10px; font-size: 14px;">📥 Emails reçus/affectés (${client.emailsAffected.length})</div>
+                                        ${client.emailsAffected.map(e => `
+                                            <div style="background: white; border-radius: 6px; padding: 10px; margin-bottom: 6px;">
+                                                <strong style="color: #333; font-size: 13px;">${Utils.escapeHtml(e.subject || 'Sans objet')}</strong>
+                                                <div style="color: #666; font-size: 11px; margin-top: 4px;">De: ${Utils.escapeHtml(e.from || '')} → ${Utils.escapeHtml(e.affectedTo || '')}</div>
+                                            </div>
+                                        `).join('')}
+                                    </div>
                                     ` : ''}
 
-                                    <!-- TÂCHES - GRID -->
-                                    ${(client.tasksCompleted.length > 0 || client.tasksOverdue.length > 0) ? `
-                                        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 16px; margin-bottom: 20px;">
-                                            ${client.tasksCompleted.length > 0 ? `
-                                                <div style="background: #f1f8e9; border-radius: 12px; padding: 16px;">
-                                                    <div style="font-size: 14px; font-weight: bold; color: #558b2f; margin-bottom: 10px; display: flex; align-items: center; gap: 8px;">
-                                                        <span style="font-size: 20px;">✅</span> Tâches terminées
-                                                    </div>
-                                                    ${client.tasksCompleted.map(t => `
-                                                        <div style="background: white; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 13px; color: #333;">
-                                                            ${Utils.escapeHtml(t.title)}
-                                                        </div>
-                                                    `).join('')}
+                                    ${client.aircallCalls.length > 0 ? `
+                                    <!-- Appels avec résumés IA complets -->
+                                    <div style="background: linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #f57c00;">
+                                        <div style="font-weight: 600; color: #e65100; margin-bottom: 10px; font-size: 14px;">📞 Appels téléphoniques (${client.aircallCalls.length})</div>
+                                        ${client.aircallCalls.map(call => {
+                                            const bgColor = call.type === 'sortant' ? '#fff8e1' : '#e8f5e9';
+                                            const borderColor = call.type === 'sortant' ? '#ffb300' : '#66bb6a';
+                                            const moodIcon = call.mood === 'Positif' ? '😊' : (call.mood === 'Négatif' ? '😟' : (call.mood === 'Neutre' ? '😐' : ''));
+                                            return `
+                                            <div style="background: ${bgColor}; border-radius: 8px; padding: 12px; margin-bottom: 8px; border-left: 3px solid ${borderColor};">
+                                                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                                    <span style="font-weight: 600; color: #333;">
+                                                        ${call.type === 'sortant' ? '📤 Sortant' : '📥 Entrant'}
+                                                        <span style="font-weight: normal; color: #666;">• ${call.duration || ''}</span>
+                                                        ${moodIcon ? `<span style="margin-left: 8px;">${moodIcon}</span>` : ''}
+                                                    </span>
+                                                    <span style="color: #888; font-size: 11px;">${call.time || ''}</span>
                                                 </div>
-                                            ` : ''}
-                                            ${client.tasksOverdue.length > 0 ? `
-                                                <div style="background: #ffebee; border-radius: 12px; padding: 16px;">
-                                                    <div style="font-size: 14px; font-weight: bold; color: #c62828; margin-bottom: 10px; display: flex; align-items: center; gap: 8px;">
-                                                        <span style="font-size: 20px;">⚠️</span> Tâches en retard
-                                                    </div>
-                                                    ${client.tasksOverdue.map(t => `
-                                                        <div style="background: white; border-radius: 8px; padding: 10px 12px; margin-bottom: 8px; font-size: 13px;">
-                                                            <div style="color: #333; font-weight: 500;">${Utils.escapeHtml(t.title)}</div>
-                                                            <div style="display: flex; justify-content: space-between; margin-top: 6px;">
-                                                                <span style="color: #c62828; font-size: 12px; font-weight: bold;">${t.daysOverdue}j de retard</span>
-                                                                <span style="color: #666; font-size: 12px;">→ ${Utils.escapeHtml(t.assignedTo || 'N/A')}</span>
-                                                            </div>
-                                                        </div>
-                                                    `).join('')}
+                                                ${call.summary ? `
+                                                <div style="background: white; border-radius: 6px; padding: 10px; font-size: 12px; color: #555; line-height: 1.5;">
+                                                    <div style="color: #ff8f00; font-size: 10px; font-weight: 600; margin-bottom: 4px;">💬 RÉSUMÉ IA</div>
+                                                    ${Utils.escapeHtml(call.summary)}
                                                 </div>
-                                            ` : ''}
-                                        </div>
+                                                ` : ''}
+                                            </div>
+                                            `;
+                                        }).join('')}
+                                    </div>
                                     ` : ''}
 
-                                    <!-- MODIFICATIONS FICHE - REGROUPÉES -->
+                                    ${client.tasksCompleted.length > 0 ? `
+                                    <!-- Tâches terminées avec heure -->
+                                    <div style="background: linear-gradient(135deg, #fff8e1 0%, #ffecb3 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #ff8f00;">
+                                        <div style="font-weight: 600; color: #e65100; margin-bottom: 10px; font-size: 14px;">✅ Tâches terminées (${client.tasksCompleted.length})</div>
+                                        ${client.tasksCompleted.map((t, tIdx) => `
+                                            <div style="background: white; border-radius: 6px; padding: 10px; margin-bottom: 6px;">
+                                                <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                                                    <strong style="color: #333; font-size: 13px;">${Utils.escapeHtml(t.title)}</strong>
+                                                    ${t.closedTime ? `<span style="background: #ff8f00; color: white; padding: 2px 8px; border-radius: 10px; font-size: 10px;">⏰ ${t.closedTime}</span>` : ''}
+                                                </div>
+                                                ${t.content ? `
+                                                    <div id="task_short_${cuid}_${tIdx}" style="color: #666; font-size: 12px; margin-top: 6px; line-height: 1.4;">${Utils.escapeHtml(Utils.truncate(t.content, 120))}</div>
+                                                    ${t.content.length > 120 ? `
+                                                        <div id="task_full_${cuid}_${tIdx}" style="display: none; color: #666; font-size: 12px; margin-top: 6px; line-height: 1.4; white-space: pre-wrap;">${Utils.escapeHtml(t.content)}</div>
+                                                        <button onclick="var s=document.getElementById('task_short_${cuid}_${tIdx}');var f=document.getElementById('task_full_${cuid}_${tIdx}');if(f.style.display==='none'){f.style.display='block';s.style.display='none';this.textContent='▲ Réduire';}else{f.style.display='none';s.style.display='block';this.textContent='▼ Voir plus';}" style="background: #ff8f00; color: white; border: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; margin-top: 6px;">▼ Voir plus</button>
+                                                    ` : ''}
+                                                ` : ''}
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                    ` : ''}
+
+                                    ${client.tasksOverdue.length > 0 ? `
+                                    <!-- Tâches en retard -->
+                                    <div style="background: linear-gradient(135deg, #ffebee 0%, #ffcdd2 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #d32f2f;">
+                                        <div style="font-weight: 600; color: #c62828; margin-bottom: 10px; font-size: 14px;">⚠️ Tâches en retard (${client.tasksOverdue.length})</div>
+                                        ${client.tasksOverdue.map(t => `
+                                            <div style="background: white; border-radius: 6px; padding: 10px; margin-bottom: 6px;">
+                                                <strong style="color: #333; font-size: 13px;">${Utils.escapeHtml(t.title)}</strong>
+                                                <div style="color: #d32f2f; font-size: 11px; margin-top: 4px;">${t.daysOverdue}j de retard • → ${Utils.escapeHtml(t.assignedTo || 'N/A')}</div>
+                                            </div>
+                                        `).join('')}
+                                    </div>
+                                    ` : ''}
+
+                                    ${(client.estimates.length > 0 || client.policies.length > 0 || client.claims.length > 0) ? `
+                                    <!-- Documents -->
+                                    <div style="background: linear-gradient(135deg, #f3e5f5 0%, #e1bee7 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #7b1fa2;">
+                                        <div style="font-weight: 600; color: #6a1b9a; margin-bottom: 10px; font-size: 14px;">📄 Documents (${client.estimates.length + client.policies.length + client.claims.length})</div>
+                                        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                                            ${client.estimates.map(e => `<span style="background: white; color: #7b1fa2; padding: 6px 12px; border-radius: 6px; font-size: 12px;">📋 Devis ${e.entityId || ''}</span>`).join('')}
+                                            ${client.policies.map(p => `<span style="background: white; color: #00796b; padding: 6px 12px; border-radius: 6px; font-size: 12px;">📄 Contrat ${p.entityId || ''}</span>`).join('')}
+                                            ${client.claims.map(c => `<span style="background: white; color: #c62828; padding: 6px 12px; border-radius: 6px; font-size: 12px;">🚨 Sinistre ${c.entityId || ''}</span>`).join('')}
+                                        </div>
+                                    </div>
+                                    ` : ''}
+
                                     ${client.logs.length > 0 ? `
-                                        <div style="background: #faf5fc; border-radius: 12px; padding: 16px;">
-                                            <div style="font-size: 14px; font-weight: bold; color: #7b1fa2; margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
-                                                <span style="font-size: 20px;">📝</span> Modifications fiche (${client.logs.length})
-                                            </div>
-                                            <div style="display: flex; gap: 12px; flex-wrap: wrap;">
-                                                ${logsCreation > 0 ? `
-                                                    <div style="background: #e8f5e9; color: #2e7d32; padding: 8px 16px; border-radius: 20px; font-size: 14px; font-weight: 600;">
-                                                        ✨ ${logsCreation} création${logsCreation > 1 ? 's' : ''}
-                                                    </div>
-                                                ` : ''}
-                                                ${logsModification > 0 ? `
-                                                    <div style="background: #fff3e0; color: #e65100; padding: 8px 16px; border-radius: 20px; font-size: 14px; font-weight: 600;">
-                                                        ✏️ ${logsModification} modification${logsModification > 1 ? 's' : ''}
-                                                    </div>
-                                                ` : ''}
-                                                ${logsSuppression > 0 ? `
-                                                    <div style="background: #ffebee; color: #c62828; padding: 8px 16px; border-radius: 20px; font-size: 14px; font-weight: 600;">
-                                                        🗑️ ${logsSuppression} suppression${logsSuppression > 1 ? 's' : ''}
-                                                    </div>
-                                                ` : ''}
-                                            </div>
+                                    <!-- Modifications regroupées -->
+                                    <div style="background: linear-gradient(135deg, #efebe9 0%, #d7ccc8 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #5d4037;">
+                                        <div style="font-weight: 600; color: #4e342e; margin-bottom: 8px; font-size: 14px;">📝 Modifications fiche (${client.logs.length})</div>
+                                        <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                                            ${(() => {
+                                                const grouped = {};
+                                                client.logs.forEach(l => {
+                                                    const action = l.action || 'Modification';
+                                                    const key = action.replace(/[✨✏️➕🗑️📝]/g, '').trim();
+                                                    if (!grouped[key]) grouped[key] = 0;
+                                                    grouped[key]++;
+                                                });
+                                                return Object.entries(grouped).map(([action, count]) => {
+                                                    let icon = '📝';
+                                                    let bg = '#f5f5f5';
+                                                    if (action.toLowerCase().includes('création') || action.toLowerCase().includes('insert')) { icon = '✨'; bg = '#e8f5e9'; }
+                                                    else if (action.toLowerCase().includes('modification') || action.toLowerCase().includes('update')) { icon = '✏️'; bg = '#fff3e0'; }
+                                                    else if (action.toLowerCase().includes('suppression') || action.toLowerCase().includes('delete')) { icon = '🗑️'; bg = '#ffebee'; }
+                                                    return `<span style="background: ${bg}; padding: 6px 12px; border-radius: 15px; font-size: 12px; font-weight: 500;">${icon} ${count} ${action.toLowerCase()}</span>`;
+                                                }).join('');
+                                            })()}
                                         </div>
+                                    </div>
                                     ` : ''}
-
                                 </div>
                             </div>
                             `;
-                        }).join('') : '<p style="text-align: center; color: #666; padding: 40px;">Aucun client avec des actions aujourd\'hui</p>'}
+                        }).join('') : '<div style="background: white; border-radius: 12px; padding: 50px; text-align: center; color: #666;">Aucun client concerné aujourd\'hui</div>'}
 
                         <!-- Footer -->
-                        <div style="text-align: center; color: #999; padding-top: 20px; border-top: 1px solid #eee; font-size: 12px;">
-                            <p>📊 Vue par Client - LTOA Modulr Script v4</p>
+                        <div style="text-align: center; color: #999; padding-top: 15px; font-size: 12px;">
+                            📊 Vue par Client - LTOA Modulr Script v4.7
                         </div>
                     </div>
                 </div>
@@ -3768,9 +3629,6 @@ const EmailsAffectedCollector = {
                 document.getElementById('ltoa-client-view-modal').remove();
             });
 
-            document.getElementById('ltoa-back-to-categories').addEventListener('click', () => {
-                document.getElementById('ltoa-client-view-modal').remove();
-            });
             } catch (error) {
                 console.error('[LTOA-Report] Erreur Vue par Client:', error);
                 alert('❌ Erreur lors de la génération de la vue par client. Consultez la console F12.');
@@ -3866,9 +3724,9 @@ const EmailsAffectedCollector = {
                     }
                 });
 
-                // Tâches terminées (utiliser l'heure de complétion si disponible)
+                // Tâches terminées (utiliser l'heure de clôture)
                 tasksCompleted.forEach(t => {
-                    const time = extractTime(t.completedDate);
+                    const time = t.closedTime || extractTime(t.completedDate);
                     if (time) {
                         allActions.push({
                             type: 'task',
@@ -3879,7 +3737,8 @@ const EmailsAffectedCollector = {
                             timeSeconds: parseTime(time),
                             title: t.title || 'Sans titre',
                             detail: `Client: ${t.client || 'N/A'}`,
-                            client: t.client || ''
+                            client: t.client || '',
+                            summary: t.content
                         });
                     }
                 });
@@ -4188,7 +4047,11 @@ const EmailsAffectedCollector = {
         },
 
         exportHTML() {
-            const { emailsSent, emailsAffected, pendingEmailsCount, tasksCompleted, tasksOverdue, logs, estimates, policies, claims, user, date } = this.data;
+            const { emailsSent, emailsAffected, aircallCalls, pendingEmailsCount, tasksCompleted, tasksOverdue, logs, estimates, policies, claims, user, date } = this.data;
+
+            // Compteurs Aircall
+            const aircallInbound = (aircallCalls || []).filter(c => c.type === 'entrant').length;
+            const aircallOutbound = (aircallCalls || []).filter(c => c.type === 'sortant').length;
 
             // Générer un HTML statique complet (pas besoin de JS)
             const htmlContent = `<!DOCTYPE html>
@@ -4322,7 +4185,55 @@ const EmailsAffectedCollector = {
     </style>
 </head>
 <body>
-    <div class="report-container">
+    <!-- Boutons de navigation -->
+    <div style="max-width: 1000px; margin: 0 auto 20px auto; display: flex; gap: 10px; justify-content: center; flex-wrap: wrap;">
+        <button onclick="showView('categories')" id="btn-categories" class="nav-btn active" style="
+            padding: 12px 25px;
+            background: linear-gradient(135deg, #c62828, #b71c1c);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            box-shadow: 0 3px 10px rgba(0,0,0,0.2);
+        ">📊 Vue Catégories</button>
+        <button onclick="showView('chrono')" id="btn-chrono" class="nav-btn" style="
+            padding: 12px 25px;
+            background: linear-gradient(135deg, #9c27b0, #7b1fa2);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            box-shadow: 0 3px 10px rgba(0,0,0,0.2);
+        ">🕐 Vue Chronologique</button>
+        <button onclick="showView('client')" id="btn-client" class="nav-btn" style="
+            padding: 12px 25px;
+            background: linear-gradient(135deg, #1565c0, #0d47a1);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            box-shadow: 0 3px 10px rgba(0,0,0,0.2);
+        ">👤 Vue par Client</button>
+        <button onclick="window.print()" style="
+            padding: 12px 25px;
+            background: linear-gradient(135deg, #666, #444);
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: bold;
+            cursor: pointer;
+            box-shadow: 0 3px 10px rgba(0,0,0,0.2);
+        ">🖨️ Imprimer</button>
+    </div>
+
+    <div id="view-categories" class="report-container">
         <!-- Header -->
         <div class="header">
             <h1>📊 Rapport d'Activité Quotidien</h1>
@@ -4351,6 +4262,10 @@ const EmailsAffectedCollector = {
             <div class="summary-card bg-green">
                 <div class="number">${emailsAffected.length}</div>
                 <div class="label">📥 Emails Affectés</div>
+            </div>
+            <div class="summary-card" style="background: linear-gradient(135deg, #ff8f00, #e65100);">
+                <div class="number">${(aircallCalls || []).length}</div>
+                <div class="label">📞 Appels (${aircallInbound}↓ ${aircallOutbound}↑)</div>
             </div>
             <div class="summary-card bg-orange">
                 <div class="number">${tasksCompleted.length}</div>
@@ -4428,18 +4343,47 @@ const EmailsAffectedCollector = {
         </div>
         ` : ''}
 
+        <!-- Appels Téléphoniques Aircall -->
+        ${(aircallCalls || []).length > 0 ? `
+        <div class="section">
+            <h2 class="section-title" style="color: #ff8f00; border-color: #ff8f00;">📞 Appels Téléphoniques (${(aircallCalls || []).length}) - ${aircallInbound} entrants / ${aircallOutbound} sortants</h2>
+            <table>
+                <tr>
+                    <th style="width: 80px;">Heure</th>
+                    <th style="width: 80px;">Type</th>
+                    <th style="width: 150px;">Contact</th>
+                    <th style="width: 80px;">Durée</th>
+                    <th style="width: 80px;">Humeur</th>
+                    <th>Résumé IA</th>
+                </tr>
+                ${(aircallCalls || []).map(c => `
+                <tr>
+                    <td>${c.time || ''}</td>
+                    <td>${c.type === 'sortant' ? '📤 Sortant' : '📥 Entrant'}</td>
+                    <td><strong>${Utils.escapeHtml(c.contact || 'Inconnu')}</strong></td>
+                    <td>${Utils.escapeHtml(c.duration || '0s')}</td>
+                    <td>${c.mood === 'Positif' ? '😊 Positif' : (c.mood === 'Négatif' ? '😟 Négatif' : (c.mood === 'Neutre' ? '😐 Neutre' : '-'))}</td>
+                    <td style="font-size: 12px;">${c.summary ? Utils.escapeHtml(c.summary) : '<span style="color:#999;">-</span>'}</td>
+                </tr>
+                `).join('')}
+            </table>
+        </div>
+        ` : ''}
+
         <!-- Tâches Terminées -->
         ${tasksCompleted.length > 0 ? `
         <div class="section">
             <h2 class="section-title orange">✅ Tâches Terminées (${tasksCompleted.length})</h2>
             <table>
                 <tr>
-                    <th style="width: 250px;">Tâche</th>
-                    <th style="width: 180px;">Client</th>
+                    <th style="width: 70px;">Heure</th>
+                    <th style="width: 220px;">Tâche</th>
+                    <th style="width: 150px;">Client</th>
                     <th>Contenu</th>
                 </tr>
                 ${tasksCompleted.map(t => `
                 <tr>
+                    <td style="text-align: center; font-weight: bold; color: #f57c00;">${t.closedTime || '-'}</td>
                     <td><strong>${Utils.escapeHtml(t.title || '')}</strong></td>
                     <td>
                         ${t.clientId ? `<a href="https://courtage.modulr.fr/fr/scripts/clients/clients_card.php?id=${t.clientId}" target="_blank">` : ''}
@@ -4570,53 +4514,56 @@ const EmailsAffectedCollector = {
         </div>
         ` : ''}
 
+
         <!-- Footer -->
         <div class="footer">
-            <p>Rapport généré le ${new Date().toLocaleString('fr-FR')} par LTOA Modulr Script v4</p>
+            <p>Rapport généré le ${new Date().toLocaleString('fr-FR')} par LTOA Modulr Script v4.7</p>
         </div>
     </div>
 
-    <!-- Boutons de contrôle -->
-    <div style="text-align: center; margin: 20px;">
-        <button onclick="toggleClientView()" id="toggleBtn" style="
-            padding: 12px 25px;
-            background: linear-gradient(135deg, #9c27b0, #7b1fa2);
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-size: 14px;
-            font-weight: bold;
-            cursor: pointer;
-            box-shadow: 0 3px 10px rgba(0,0,0,0.2);
-        ">👥 Vue par Client</button>
+    <!-- Vue Chronologique (cachée par défaut) -->
+    <div id="view-chrono" class="report-container" style="display: none;">
+        <div class="header" style="background: linear-gradient(135deg, #9c27b0, #7b1fa2);">
+            <h1>🕐 Vue Chronologique</h1>
+            <p><strong>${Utils.escapeHtml(user)}</strong> - ${date}</p>
+        </div>
+        <div style="padding: 20px;">
+            ${this.generateChronoViewHTML()}
+        </div>
+        <div class="footer">
+            <p>Rapport généré le ${new Date().toLocaleString('fr-FR')} par LTOA Modulr Script v4.7</p>
+        </div>
     </div>
 
     <!-- Vue par Client (cachée par défaut) -->
-    <div id="clientView" class="report-container" style="display: none; margin-top: 20px;">
-        <div class="header" style="background: linear-gradient(135deg, #9c27b0, #7b1fa2);">
-            <h1>👥 Vue par Client</h1>
+    <div id="view-client" class="report-container" style="display: none;">
+        <div class="header" style="background: linear-gradient(135deg, #1565c0, #0d47a1);">
+            <h1>👤 Vue par Client</h1>
             <p>Toutes les actions groupées par client</p>
         </div>
         <div style="padding: 20px;">
             ${this.generateClientViewHTML()}
         </div>
+        <div class="footer">
+            <p>Rapport généré le ${new Date().toLocaleString('fr-FR')} par LTOA Modulr Script v4.7</p>
+        </div>
     </div>
 
     <script>
-        function toggleClientView() {
-            const cv = document.getElementById('clientView');
-            const btn = document.getElementById('toggleBtn');
-            if (cv.style.display === 'none') {
-                cv.style.display = 'block';
-                btn.textContent = '📋 Vue Chronologique';
-                btn.style.background = 'linear-gradient(135deg, #1976d2, #0d47a1)';
-                document.querySelector('.report-container').style.display = 'none';
-            } else {
-                cv.style.display = 'none';
-                btn.textContent = '👥 Vue par Client';
-                btn.style.background = 'linear-gradient(135deg, #9c27b0, #7b1fa2)';
-                document.querySelector('.report-container').style.display = 'block';
-            }
+        function showView(viewName) {
+            // Cacher toutes les vues
+            document.getElementById('view-categories').style.display = 'none';
+            document.getElementById('view-chrono').style.display = 'none';
+            document.getElementById('view-client').style.display = 'none';
+
+            // Afficher la vue demandée
+            document.getElementById('view-' + viewName).style.display = 'block';
+
+            // Mettre à jour les styles des boutons
+            document.getElementById('btn-categories').style.opacity = '0.6';
+            document.getElementById('btn-chrono').style.opacity = '0.6';
+            document.getElementById('btn-client').style.opacity = '0.6';
+            document.getElementById('btn-' + viewName).style.opacity = '1';
         }
 
         // Fonction pour déplier/replier les détails client
@@ -4649,11 +4596,238 @@ const EmailsAffectedCollector = {
             alert(`✅ HTML exporté: ${a.download}\n\nVous pouvez l'ouvrir dans n'importe quel navigateur, l'imprimer ou le partager par email !`);
         },
 
+        // Générer le HTML de la vue chronologique pour l'export
+        generateChronoViewHTML() {
+            const { emailsSent, emailsAffected, aircallCalls, tasksCompleted, tasksOverdue, estimates, policies, claims, logs, user, date } = this.data;
+
+            // Fonctions utilitaires
+            const parseTime = (timeStr) => {
+                if (!timeStr) return null;
+                const parts = timeStr.split(':');
+                if (parts.length >= 2) {
+                    const hours = parseInt(parts[0], 10);
+                    const minutes = parseInt(parts[1], 10);
+                    const seconds = parts[2] ? parseInt(parts[2], 10) : 0;
+                    return hours * 3600 + minutes * 60 + seconds;
+                }
+                return null;
+            };
+
+            const extractTime = (dateStr) => {
+                if (!dateStr) return null;
+                const match = dateStr.match(/(\d{1,2}):(\d{2})/);
+                if (match) {
+                    return `${match[1].padStart(2, '0')}:${match[2]}`;
+                }
+                return null;
+            };
+
+            const formatDuration = (seconds) => {
+                const h = Math.floor(seconds / 3600);
+                const m = Math.floor((seconds % 3600) / 60);
+                if (h > 0) return `${h}h ${m}min`;
+                return `${m}min`;
+            };
+
+            // Collecter toutes les actions
+            const allActions = [];
+
+            // Emails envoyés
+            emailsSent.forEach(e => {
+                const time = e.time || extractTime(e.date);
+                if (time) {
+                    allActions.push({
+                        type: 'email_sent',
+                        icon: '📤',
+                        color: '#1976d2',
+                        label: 'Email envoyé',
+                        time: time,
+                        timeSeconds: parseTime(time),
+                        title: e.subject || 'Sans objet',
+                        detail: `À: ${e.to || e.toEmail || e.clientName || 'N/A'}`,
+                        summary: e.body
+                    });
+                }
+            });
+
+            // Emails affectés
+            emailsAffected.forEach(e => {
+                const time = e.time || extractTime(e.date);
+                if (time) {
+                    allActions.push({
+                        type: 'email_affected',
+                        icon: '📥',
+                        color: '#388e3c',
+                        label: 'Email affecté',
+                        time: time,
+                        timeSeconds: parseTime(time),
+                        title: e.subject || 'Sans objet',
+                        detail: `De: ${e.from || 'N/A'} → ${e.affectedTo || 'N/A'}`
+                    });
+                }
+            });
+
+            // Appels Aircall
+            (aircallCalls || []).forEach(c => {
+                const time = c.time;
+                if (time) {
+                    allActions.push({
+                        type: 'call',
+                        icon: c.type === 'sortant' ? '📞↗' : '📞↙',
+                        color: '#ff8f00',
+                        label: c.type === 'sortant' ? 'Appel sortant' : 'Appel entrant',
+                        time: time,
+                        timeSeconds: parseTime(time),
+                        title: c.contact || 'Inconnu',
+                        detail: `Durée: ${c.duration || '0s'}${c.mood ? ' | ' + c.mood : ''}`,
+                        summary: c.summary
+                    });
+                }
+            });
+
+            // Tâches terminées
+            tasksCompleted.forEach(t => {
+                const time = t.closedTime || extractTime(t.completedDate);
+                if (time) {
+                    allActions.push({
+                        type: 'task',
+                        icon: '✅',
+                        color: '#f57c00',
+                        label: 'Tâche terminée',
+                        time: time,
+                        timeSeconds: parseTime(time),
+                        title: t.title || 'Sans titre',
+                        detail: `Client: ${t.client || 'N/A'}`,
+                        summary: t.content
+                    });
+                }
+            });
+
+            // Trier par heure
+            allActions.sort((a, b) => {
+                if (a.timeSeconds === null) return 1;
+                if (b.timeSeconds === null) return -1;
+                return a.timeSeconds - b.timeSeconds;
+            });
+
+            if (allActions.length === 0) {
+                return '<p style="text-align: center; color: #999; padding: 40px;">Aucune activité avec heure à afficher</p>';
+            }
+
+            // Générer le bandeau temps de travail
+            let totalWorkTimeHTML = '';
+            if (allActions.length >= 2) {
+                const first = allActions[0];
+                const last = allActions[allActions.length - 1];
+                if (first.timeSeconds !== null && last.timeSeconds !== null) {
+                    const total = last.timeSeconds - first.timeSeconds;
+                    totalWorkTimeHTML = `
+                    <div style="
+                        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                        color: white;
+                        padding: 15px 20px;
+                        border-radius: 10px;
+                        margin-bottom: 20px;
+                        display: flex;
+                        justify-content: space-between;
+                        align-items: center;
+                    ">
+                        <div>
+                            <div style="font-size: 12px; opacity: 0.9;">Plage horaire de travail</div>
+                            <div style="font-size: 18px; font-weight: bold;">${first.time} → ${last.time}</div>
+                        </div>
+                        <div style="text-align: right;">
+                            <div style="font-size: 12px; opacity: 0.9;">Durée totale</div>
+                            <div style="font-size: 18px; font-weight: bold;">${formatDuration(total)}</div>
+                        </div>
+                    </div>`;
+                }
+            }
+
+            // Générer la timeline
+            let timelineHTML = totalWorkTimeHTML;
+            let prevAction = null;
+
+            for (const action of allActions) {
+                // Calculer temps écoulé depuis l'action précédente
+                let elapsedHTML = '';
+                if (prevAction && prevAction.timeSeconds !== null && action.timeSeconds !== null) {
+                    const elapsed = action.timeSeconds - prevAction.timeSeconds;
+                    if (elapsed > 60) {
+                        elapsedHTML = `
+                            <div style="text-align: center; padding: 8px 0; color: #999; font-size: 11px;">
+                                ⏱️ +${formatDuration(elapsed)}
+                            </div>`;
+                    }
+                }
+                prevAction = action;
+
+                timelineHTML += `
+                    ${elapsedHTML}
+                    <div style="display: flex; align-items: flex-start; padding: 10px 0;">
+                        <div style="
+                            width: 38px;
+                            height: 38px;
+                            border-radius: 50%;
+                            background: ${action.color};
+                            display: flex;
+                            align-items: center;
+                            justify-content: center;
+                            font-size: 16px;
+                            flex-shrink: 0;
+                            box-shadow: 0 2px 8px ${action.color}40;
+                        ">${action.icon}</div>
+                        <div style="
+                            flex: 1;
+                            margin-left: 15px;
+                            background: white;
+                            border: 1px solid #e0e0e0;
+                            border-radius: 8px;
+                            padding: 12px 15px;
+                            box-shadow: 0 1px 3px rgba(0,0,0,0.05);
+                        ">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+                                <span style="
+                                    background: ${action.color}20;
+                                    color: ${action.color};
+                                    padding: 2px 8px;
+                                    border-radius: 4px;
+                                    font-size: 11px;
+                                    font-weight: bold;
+                                ">${action.label}</span>
+                                <span style="font-size: 13px; color: #333; font-weight: bold;">🕐 ${action.time}</span>
+                            </div>
+                            <div style="font-size: 14px; font-weight: 600; color: #333; margin-bottom: 3px;">
+                                ${Utils.escapeHtml(action.title)}
+                            </div>
+                            <div style="font-size: 12px; color: #666;">
+                                ${Utils.escapeHtml(action.detail)}
+                            </div>
+                            ${action.summary ? `
+                                <div style="
+                                    margin-top: 8px;
+                                    padding: 8px;
+                                    background: #f9f9f9;
+                                    border-radius: 4px;
+                                    font-size: 11px;
+                                    color: #555;
+                                    border-left: 3px solid ${action.color};
+                                ">
+                                    ✨ ${Utils.escapeHtml(Utils.truncate(action.summary, 200))}
+                                </div>
+                            ` : ''}
+                        </div>
+                    </div>`;
+            }
+
+            return `<div style="background: #fafafa; padding: 15px; border-radius: 10px;">${timelineHTML}</div>`;
+        },
+
         // Générer le HTML de la vue par client pour l'export
         generateClientViewHTML() {
-            const { emailsSent, emailsAffected, tasksCompleted, tasksOverdue, estimates, policies, claims, clientIndex } = this.data;
+            const { emailsSent, emailsAffected, aircallCalls, tasksCompleted, tasksOverdue, estimates, policies, claims, logs, clientIndex } = this.data;
 
-            // Grouper par client
+            // Grouper par client (même logique que la modale)
             const clientsMap = new Map();
 
             const addToClient = (clientKey, clientName, clientId, clientEmail, category, item) => {
@@ -4669,11 +4843,13 @@ const EmailsAffectedCollector = {
                         email: clientEmail || null,
                         emailsSent: [],
                         emailsAffected: [],
+                        aircallCalls: [],
                         tasksCompleted: [],
                         tasksOverdue: [],
                         estimates: [],
                         policies: [],
-                        claims: []
+                        claims: [],
+                        logs: []
                     });
                 }
 
@@ -4687,19 +4863,22 @@ const EmailsAffectedCollector = {
                 }
             };
 
-            // Emails envoyés
+            // Grouper les données
             emailsSent.forEach(e => {
                 const key = e.clientId || e.toEmail?.toLowerCase() || 'unknown';
                 addToClient(key, e.clientName, e.clientId, e.toEmail, 'emailsSent', e);
             });
 
-            // Emails affectés
             emailsAffected.forEach(e => {
                 const key = e.clientId || e.affectedTo?.toLowerCase() || 'unknown';
                 addToClient(key, e.clientName || e.affectedTo, e.clientId, e.clientEmail, 'emailsAffected', e);
             });
 
-            // Tâches
+            (aircallCalls || []).forEach(c => {
+                const key = c.clientId || c.contact?.toLowerCase() || 'unknown';
+                addToClient(key, c.contact, c.clientId, null, 'aircallCalls', c);
+            });
+
             tasksCompleted.forEach(t => {
                 const key = t.clientId || t.client?.toLowerCase() || 'unknown';
                 addToClient(key, t.clientName || t.client, t.clientId, t.clientEmail, 'tasksCompleted', t);
@@ -4710,7 +4889,6 @@ const EmailsAffectedCollector = {
                 addToClient(key, t.clientName || t.client, t.clientId, t.clientEmail, 'tasksOverdue', t);
             });
 
-            // Devis, Contrats, Sinistres
             estimates.forEach(e => {
                 const key = e.clientId || 'unknown';
                 addToClient(key, e.clientName, e.clientId, e.clientEmail, 'estimates', e);
@@ -4726,131 +4904,281 @@ const EmailsAffectedCollector = {
                 addToClient(key, c.clientName, c.clientId, c.clientEmail, 'claims', c);
             });
 
-            // Trier: clients avec ID d'abord, puis par nom
-            const sortedClients = Array.from(clientsMap.entries()).sort((a, b) => {
-                if (a[0] === 'non_associé') return 1;
-                if (b[0] === 'non_associé') return -1;
-                if (a[1].id && !b[1].id) return -1;
-                if (!a[1].id && b[1].id) return 1;
-                return (a[1].name || '').localeCompare(b[1].name || '');
-            });
+            // Trier
+            const sortedClients = Array.from(clientsMap.values()).sort((a, b) => {
+                if (a.name === 'Non associé / Non résolu') return 1;
+                if (b.name === 'Non associé / Non résolu') return -1;
+                if (a.id && !b.id) return -1;
+                if (!a.id && b.id) return 1;
+                return (a.name || '').localeCompare(b.name || '');
+            }).filter(c =>
+                c.emailsSent.length + c.emailsAffected.length + c.aircallCalls.length +
+                c.tasksCompleted.length + c.tasksOverdue.length + c.estimates.length +
+                c.policies.length + c.claims.length > 0
+            );
 
             if (sortedClients.length === 0) {
-                return '<p style="text-align:center; color:#999;">Aucun client trouvé</p>';
+                return '<p style="text-align: center; color: #999; padding: 40px;">Aucun client trouvé</p>';
             }
 
-            // Générer le HTML
-            let html = '';
-            let clientIdx = 0;
+            // Générer le HTML identique à la modale
+            let html = '<div style="background: #f5f5f5; padding: 15px; border-radius: 10px;">';
 
-            for (const [key, client] of sortedClients) {
-                clientIdx++;
-                const totalActions = client.emailsSent.length + client.emailsAffected.length +
-                                   client.tasksCompleted.length + client.tasksOverdue.length +
-                                   client.estimates.length + client.policies.length + client.claims.length;
+            sortedClients.forEach((client, clientIdx) => {
+                const clientLink = client.id ?
+                    `https://courtage.modulr.fr/fr/scripts/clients/clients_card.php?id=${client.id}` : '#';
+                const cuid = 'exp_' + clientIdx;
 
                 html += `
-                <div style="border: 1px solid #ddd; border-radius: 10px; margin-bottom: 15px; overflow: hidden;">
-                    <div onclick="toggleClient('client-${clientIdx}')" style="
-                        background: linear-gradient(135deg, #f5f5f5, #e0e0e0);
-                        padding: 15px;
-                        cursor: pointer;
-                        display: flex;
-                        justify-content: space-between;
-                        align-items: center;
-                    ">
-                        <div>
-                            <span id="icon-client-${clientIdx}" style="margin-right: 10px;">▶</span>
-                            <strong style="font-size: 16px;">👤 ${Utils.escapeHtml(client.name)}</strong>
-                            ${client.id ? `<span style="background: #1976d2; color: white; padding: 2px 8px; border-radius: 10px; font-size: 11px; margin-left: 10px;">N° ${client.id}</span>` : ''}
-                            ${client.email ? `<br><span style="color: #666; font-size: 12px; margin-left: 25px;">📧 ${Utils.escapeHtml(client.email)}</span>` : ''}
-                        </div>
-                        <div style="display: flex; gap: 8px;">
-                            ${client.emailsSent.length > 0 ? `<span style="background: #e3f2fd; color: #1976d2; padding: 3px 8px; border-radius: 12px; font-size: 11px;">📤 ${client.emailsSent.length}</span>` : ''}
-                            ${client.emailsAffected.length > 0 ? `<span style="background: #e8f5e9; color: #388e3c; padding: 3px 8px; border-radius: 12px; font-size: 11px;">📥 ${client.emailsAffected.length}</span>` : ''}
-                            ${client.tasksCompleted.length > 0 ? `<span style="background: #fff3e0; color: #f57c00; padding: 3px 8px; border-radius: 12px; font-size: 11px;">✅ ${client.tasksCompleted.length}</span>` : ''}
-                            ${client.tasksOverdue.length > 0 ? `<span style="background: #ffebee; color: #d32f2f; padding: 3px 8px; border-radius: 12px; font-size: 11px;">⚠️ ${client.tasksOverdue.length}</span>` : ''}
-                            ${client.estimates.length > 0 ? `<span style="background: #e0f7fa; color: #0097a7; padding: 3px 8px; border-radius: 12px; font-size: 11px;">📋 ${client.estimates.length}</span>` : ''}
-                            ${client.policies.length > 0 ? `<span style="background: #e8eaf6; color: #3f51b5; padding: 3px 8px; border-radius: 12px; font-size: 11px;">📄 ${client.policies.length}</span>` : ''}
-                            ${client.claims.length > 0 ? `<span style="background: #fce4ec; color: #c2185b; padding: 3px 8px; border-radius: 12px; font-size: 11px;">🚨 ${client.claims.length}</span>` : ''}
+                <div style="background: white; border-radius: 12px; margin-bottom: 20px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.08);">
+                    <!-- En-tête client avec gradient -->
+                    <div style="background: linear-gradient(135deg, #1565c0 0%, #0d47a1 100%); color: white; padding: 18px 22px;">
+                        <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                            <div>
+                                <a href="${clientLink}" target="_blank" style="color: white; text-decoration: none; font-size: 18px; font-weight: 600;">
+                                    👤 ${Utils.escapeHtml(client.name)}
+                                </a>
+                                ${client.id ? `<span style="background: rgba(255,255,255,0.2); padding: 3px 10px; border-radius: 12px; font-size: 11px; margin-left: 10px;">N° ${client.id}</span>` : ''}
+                                ${client.email ? `<div style="opacity: 0.8; font-size: 12px; margin-top: 5px;">📧 ${Utils.escapeHtml(client.email)}</div>` : ''}
+                            </div>
+                            <div style="display: flex; gap: 6px; flex-wrap: wrap;">
+                                ${client.emailsSent.length > 0 ? `<span style="background: #2196f3; padding: 4px 12px; border-radius: 15px; font-size: 11px; font-weight: 500;">📤 ${client.emailsSent.length}</span>` : ''}
+                                ${client.emailsAffected.length > 0 ? `<span style="background: #4caf50; padding: 4px 12px; border-radius: 15px; font-size: 11px; font-weight: 500;">📥 ${client.emailsAffected.length}</span>` : ''}
+                                ${client.aircallCalls.length > 0 ? `<span style="background: #ff9800; padding: 4px 12px; border-radius: 15px; font-size: 11px; font-weight: 500;">📞 ${client.aircallCalls.length}</span>` : ''}
+                                ${client.tasksCompleted.length > 0 ? `<span style="background: #ff5722; padding: 4px 12px; border-radius: 15px; font-size: 11px; font-weight: 500;">✅ ${client.tasksCompleted.length}</span>` : ''}
+                            </div>
                         </div>
                     </div>
-                    <div id="client-${clientIdx}" style="display: none; padding: 15px; background: #fafafa;">
-                        ${this.generateClientDetailsHTML(client)}
-                    </div>
-                </div>`;
-            }
 
+                    <!-- Contenu avec cartes colorées -->
+                    <div style="padding: 18px; display: grid; gap: 12px;">
+
+                        ${client.emailsSent.length > 0 ? `
+                        <div style="background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #1976d2;">
+                            <div style="font-weight: 600; color: #1565c0; margin-bottom: 10px; font-size: 14px;">📤 Emails envoyés (${client.emailsSent.length})</div>
+                            ${client.emailsSent.map((e, eIdx) => `
+                                <div style="background: white; border-radius: 6px; padding: 10px; margin-bottom: 6px;">
+                                    <div style="display: flex; justify-content: space-between;">
+                                        <strong style="color: #333; font-size: 13px;">${Utils.escapeHtml(e.subject || 'Sans objet')}</strong>
+                                        <span style="color: #1976d2; font-size: 11px; font-weight: 500;">${e.time || ''}</span>
+                                    </div>
+                                    ${e.body ? `
+                                        <div id="email_short_${cuid}_${eIdx}" style="color: #666; font-size: 12px; margin-top: 6px; line-height: 1.4;">${Utils.escapeHtml(Utils.truncate(e.body, 150))}</div>
+                                        ${e.body.length > 150 ? `
+                                            <div id="email_full_${cuid}_${eIdx}" style="display: none; color: #666; font-size: 12px; margin-top: 6px; line-height: 1.4; white-space: pre-wrap;">${Utils.escapeHtml(e.body)}</div>
+                                            <button onclick="var s=document.getElementById('email_short_${cuid}_${eIdx}');var f=document.getElementById('email_full_${cuid}_${eIdx}');if(f.style.display==='none'){f.style.display='block';s.style.display='none';this.textContent='▲ Réduire';}else{f.style.display='none';s.style.display='block';this.textContent='▼ Voir plus';}" style="background: #1976d2; color: white; border: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; margin-top: 6px;">▼ Voir plus</button>
+                                        ` : ''}
+                                    ` : ''}
+                                </div>
+                            `).join('')}
+                        </div>
+                        ` : ''}
+
+                        ${client.emailsAffected.length > 0 ? `
+                        <div style="background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #388e3c;">
+                            <div style="font-weight: 600; color: #2e7d32; margin-bottom: 10px; font-size: 14px;">📥 Emails reçus/affectés (${client.emailsAffected.length})</div>
+                            ${client.emailsAffected.map(e => `
+                                <div style="background: white; border-radius: 6px; padding: 10px; margin-bottom: 6px;">
+                                    <strong style="color: #333; font-size: 13px;">${Utils.escapeHtml(e.subject || 'Sans objet')}</strong>
+                                    <div style="color: #666; font-size: 11px; margin-top: 4px;">De: ${Utils.escapeHtml(e.from || '')} → ${Utils.escapeHtml(e.affectedTo || '')}</div>
+                                </div>
+                            `).join('')}
+                        </div>
+                        ` : ''}
+
+                        ${client.aircallCalls.length > 0 ? `
+                        <div style="background: linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #f57c00;">
+                            <div style="font-weight: 600; color: #e65100; margin-bottom: 10px; font-size: 14px;">📞 Appels téléphoniques (${client.aircallCalls.length})</div>
+                            ${client.aircallCalls.map(call => {
+                                const bgColor = call.type === 'sortant' ? '#fff8e1' : '#e8f5e9';
+                                const borderColor = call.type === 'sortant' ? '#ffb300' : '#66bb6a';
+                                const moodIcon = call.mood === 'Positif' ? '😊' : (call.mood === 'Négatif' ? '😟' : (call.mood === 'Neutre' ? '😐' : ''));
+                                return `
+                                <div style="background: ${bgColor}; border-radius: 8px; padding: 12px; margin-bottom: 8px; border-left: 3px solid ${borderColor};">
+                                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                        <span style="font-weight: 600; color: #333;">
+                                            ${call.type === 'sortant' ? '📤 Sortant' : '📥 Entrant'}
+                                            <span style="font-weight: normal; color: #666;">• ${call.duration || ''}</span>
+                                            ${moodIcon ? `<span style="margin-left: 8px;">${moodIcon}</span>` : ''}
+                                        </span>
+                                        <span style="color: #888; font-size: 11px;">${call.time || ''}</span>
+                                    </div>
+                                    ${call.summary ? `
+                                    <div style="background: white; border-radius: 6px; padding: 10px; font-size: 12px; color: #555; line-height: 1.5;">
+                                        <div style="color: #ff8f00; font-size: 10px; font-weight: 600; margin-bottom: 4px;">💬 RÉSUMÉ IA</div>
+                                        ${Utils.escapeHtml(call.summary)}
+                                    </div>
+                                    ` : ''}
+                                </div>
+                                `;
+                            }).join('')}
+                        </div>
+                        ` : ''}
+
+                        ${client.tasksCompleted.length > 0 ? `
+                        <div style="background: linear-gradient(135deg, #fff8e1 0%, #ffecb3 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #ff8f00;">
+                            <div style="font-weight: 600; color: #e65100; margin-bottom: 10px; font-size: 14px;">✅ Tâches terminées (${client.tasksCompleted.length})</div>
+                            ${client.tasksCompleted.map((t, tIdx) => `
+                                <div style="background: white; border-radius: 6px; padding: 10px; margin-bottom: 6px;">
+                                    <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                                        <strong style="color: #333; font-size: 13px;">${Utils.escapeHtml(t.title)}</strong>
+                                        ${t.closedTime ? `<span style="background: #ff8f00; color: white; padding: 2px 8px; border-radius: 10px; font-size: 10px;">⏰ ${t.closedTime}</span>` : ''}
+                                    </div>
+                                    ${t.content ? `
+                                        <div id="task_short_${cuid}_${tIdx}" style="color: #666; font-size: 12px; margin-top: 6px; line-height: 1.4;">${Utils.escapeHtml(Utils.truncate(t.content, 120))}</div>
+                                        ${t.content.length > 120 ? `
+                                            <div id="task_full_${cuid}_${tIdx}" style="display: none; color: #666; font-size: 12px; margin-top: 6px; line-height: 1.4; white-space: pre-wrap;">${Utils.escapeHtml(t.content)}</div>
+                                            <button onclick="var s=document.getElementById('task_short_${cuid}_${tIdx}');var f=document.getElementById('task_full_${cuid}_${tIdx}');if(f.style.display==='none'){f.style.display='block';s.style.display='none';this.textContent='▲ Réduire';}else{f.style.display='none';s.style.display='block';this.textContent='▼ Voir plus';}" style="background: #ff8f00; color: white; border: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; margin-top: 6px;">▼ Voir plus</button>
+                                        ` : ''}
+                                    ` : ''}
+                                </div>
+                            `).join('')}
+                        </div>
+                        ` : ''}
+
+                        ${client.tasksOverdue.length > 0 ? `
+                        <div style="background: linear-gradient(135deg, #ffebee 0%, #ffcdd2 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #d32f2f;">
+                            <div style="font-weight: 600; color: #c62828; margin-bottom: 10px; font-size: 14px;">⚠️ Tâches en retard (${client.tasksOverdue.length})</div>
+                            ${client.tasksOverdue.map(t => `
+                                <div style="background: white; border-radius: 6px; padding: 10px; margin-bottom: 6px;">
+                                    <strong style="color: #333; font-size: 13px;">${Utils.escapeHtml(t.title)}</strong>
+                                    <div style="color: #d32f2f; font-size: 11px; margin-top: 4px;">${t.daysOverdue}j de retard • → ${Utils.escapeHtml(t.assignedTo || 'N/A')}</div>
+                                </div>
+                            `).join('')}
+                        </div>
+                        ` : ''}
+
+                        ${(client.estimates.length > 0 || client.policies.length > 0 || client.claims.length > 0) ? `
+                        <div style="background: linear-gradient(135deg, #f3e5f5 0%, #e1bee7 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #7b1fa2;">
+                            <div style="font-weight: 600; color: #6a1b9a; margin-bottom: 10px; font-size: 14px;">📄 Documents (${client.estimates.length + client.policies.length + client.claims.length})</div>
+                            <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                                ${client.estimates.map(e => `<span style="background: white; color: #7b1fa2; padding: 6px 12px; border-radius: 6px; font-size: 12px;">📋 Devis ${e.entityId || ''}</span>`).join('')}
+                                ${client.policies.map(p => `<span style="background: white; color: #00796b; padding: 6px 12px; border-radius: 6px; font-size: 12px;">📄 Contrat ${p.entityId || ''}</span>`).join('')}
+                                ${client.claims.map(c => `<span style="background: white; color: #c62828; padding: 6px 12px; border-radius: 6px; font-size: 12px;">🚨 Sinistre ${c.entityId || ''}</span>`).join('')}
+                            </div>
+                        </div>
+                        ` : ''}
+                    </div>
+                </div>
+                `;
+            });
+
+            html += '</div>';
             return html;
         },
 
         // Générer les détails d'un client pour l'export HTML
-        generateClientDetailsHTML(client) {
-            let html = '';
+        generateClientDetailsHTML(client, clientIdx) {
+            let html = '<div style="display: grid; gap: 12px;">';
+            const cuid = 'exp_' + clientIdx;
 
             if (client.emailsSent.length > 0) {
-                html += `<div style="margin-bottom: 15px;">
-                    <h4 style="color: #1976d2; margin-bottom: 8px;">📤 Emails Envoyés (${client.emailsSent.length})</h4>
-                    <ul style="margin: 0; padding-left: 20px;">
-                        ${client.emailsSent.map(e => `<li style="margin-bottom: 5px;"><strong>${Utils.escapeHtml(e.subject || 'Sans objet')}</strong> <span style="color:#666;">(${e.time || ''})</span></li>`).join('')}
-                    </ul>
+                html += `<div style="background: linear-gradient(135deg, #e3f2fd 0%, #bbdefb 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #1976d2;">
+                    <div style="font-weight: 600; color: #1565c0; margin-bottom: 10px; font-size: 14px;">📤 Emails envoyés (${client.emailsSent.length})</div>
+                    ${client.emailsSent.map((e, eIdx) => `
+                        <div style="background: white; border-radius: 6px; padding: 10px; margin-bottom: 6px;">
+                            <div style="display: flex; justify-content: space-between;">
+                                <strong style="color: #333; font-size: 13px;">${Utils.escapeHtml(e.subject || 'Sans objet')}</strong>
+                                <span style="color: #1976d2; font-size: 11px; font-weight: 500;">${e.time || ''}</span>
+                            </div>
+                            ${e.body ? `
+                                <div id="email_short_${cuid}_${eIdx}" style="color: #666; font-size: 12px; margin-top: 6px; line-height: 1.4;">${Utils.escapeHtml(Utils.truncate(e.body, 150))}</div>
+                                ${e.body.length > 150 ? `
+                                    <div id="email_full_${cuid}_${eIdx}" style="display: none; color: #666; font-size: 12px; margin-top: 6px; line-height: 1.4; white-space: pre-wrap;">${Utils.escapeHtml(e.body)}</div>
+                                    <button onclick="var s=document.getElementById('email_short_${cuid}_${eIdx}');var f=document.getElementById('email_full_${cuid}_${eIdx}');if(f.style.display==='none'){f.style.display='block';s.style.display='none';this.textContent='▲ Réduire';}else{f.style.display='none';s.style.display='block';this.textContent='▼ Voir plus';}" style="background: #1976d2; color: white; border: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; margin-top: 6px;">▼ Voir plus</button>
+                                ` : ''}
+                            ` : ''}
+                        </div>
+                    `).join('')}
                 </div>`;
             }
 
             if (client.emailsAffected.length > 0) {
-                html += `<div style="margin-bottom: 15px;">
-                    <h4 style="color: #388e3c; margin-bottom: 8px;">📥 Emails Affectés (${client.emailsAffected.length})</h4>
-                    <ul style="margin: 0; padding-left: 20px;">
-                        ${client.emailsAffected.map(e => `<li style="margin-bottom: 5px;"><strong>${Utils.escapeHtml(e.subject || 'Sans objet')}</strong> <span style="color:#666;">de ${Utils.escapeHtml(e.from || '')}</span></li>`).join('')}
-                    </ul>
+                html += `<div style="background: linear-gradient(135deg, #e8f5e9 0%, #c8e6c9 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #388e3c;">
+                    <div style="font-weight: 600; color: #2e7d32; margin-bottom: 10px; font-size: 14px;">📥 Emails reçus/affectés (${client.emailsAffected.length})</div>
+                    ${client.emailsAffected.map(e => `
+                        <div style="background: white; border-radius: 6px; padding: 10px; margin-bottom: 6px;">
+                            <strong style="color: #333; font-size: 13px;">${Utils.escapeHtml(e.subject || 'Sans objet')}</strong>
+                            <div style="color: #666; font-size: 11px; margin-top: 4px;">De: ${Utils.escapeHtml(e.from || '')} → ${Utils.escapeHtml(e.affectedTo || '')}</div>
+                        </div>
+                    `).join('')}
+                </div>`;
+            }
+
+            if (client.aircallCalls && client.aircallCalls.length > 0) {
+                html += `<div style="background: linear-gradient(135deg, #fff3e0 0%, #ffe0b2 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #f57c00;">
+                    <div style="font-weight: 600; color: #e65100; margin-bottom: 10px; font-size: 14px;">📞 Appels téléphoniques (${client.aircallCalls.length})</div>
+                    ${client.aircallCalls.map(call => {
+                        const bgColor = call.type === 'sortant' ? '#fff8e1' : '#e8f5e9';
+                        const borderColor = call.type === 'sortant' ? '#ffb300' : '#66bb6a';
+                        const moodIcon = call.mood === 'Positif' ? '😊' : (call.mood === 'Négatif' ? '😟' : (call.mood === 'Neutre' ? '😐' : ''));
+                        return `
+                        <div style="background: ${bgColor}; border-radius: 8px; padding: 12px; margin-bottom: 8px; border-left: 3px solid ${borderColor};">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                <span style="font-weight: 600; color: #333;">
+                                    ${call.type === 'sortant' ? '📤 Sortant' : '📥 Entrant'}
+                                    <span style="font-weight: normal; color: #666;">• ${call.duration || ''}</span>
+                                    ${moodIcon ? `<span style="margin-left: 8px;">${moodIcon}</span>` : ''}
+                                </span>
+                                <span style="color: #888; font-size: 11px;">${call.time || ''}</span>
+                            </div>
+                            ${call.summary ? `
+                            <div style="background: white; border-radius: 6px; padding: 10px; font-size: 12px; color: #555; line-height: 1.5;">
+                                <div style="color: #ff8f00; font-size: 10px; font-weight: 600; margin-bottom: 4px;">💬 RÉSUMÉ IA</div>
+                                ${Utils.escapeHtml(call.summary)}
+                            </div>
+                            ` : ''}
+                        </div>
+                        `;
+                    }).join('')}
                 </div>`;
             }
 
             if (client.tasksCompleted.length > 0) {
-                html += `<div style="margin-bottom: 15px;">
-                    <h4 style="color: #f57c00; margin-bottom: 8px;">✅ Tâches Terminées (${client.tasksCompleted.length})</h4>
-                    <ul style="margin: 0; padding-left: 20px;">
-                        ${client.tasksCompleted.map(t => `<li style="margin-bottom: 5px;"><strong>${Utils.escapeHtml(t.title || '')}</strong></li>`).join('')}
-                    </ul>
+                html += `<div style="background: linear-gradient(135deg, #fff8e1 0%, #ffecb3 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #ff8f00;">
+                    <div style="font-weight: 600; color: #e65100; margin-bottom: 10px; font-size: 14px;">✅ Tâches terminées (${client.tasksCompleted.length})</div>
+                    ${client.tasksCompleted.map((t, tIdx) => `
+                        <div style="background: white; border-radius: 6px; padding: 10px; margin-bottom: 6px;">
+                            <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                                <strong style="color: #333; font-size: 13px;">${Utils.escapeHtml(t.title)}</strong>
+                                ${t.closedTime ? `<span style="background: #ff8f00; color: white; padding: 2px 8px; border-radius: 10px; font-size: 10px;">⏰ ${t.closedTime}</span>` : ''}
+                            </div>
+                            ${t.content ? `
+                                <div id="task_short_${cuid}_${tIdx}" style="color: #666; font-size: 12px; margin-top: 6px; line-height: 1.4;">${Utils.escapeHtml(Utils.truncate(t.content, 120))}</div>
+                                ${t.content.length > 120 ? `
+                                    <div id="task_full_${cuid}_${tIdx}" style="display: none; color: #666; font-size: 12px; margin-top: 6px; line-height: 1.4; white-space: pre-wrap;">${Utils.escapeHtml(t.content)}</div>
+                                    <button onclick="var s=document.getElementById('task_short_${cuid}_${tIdx}');var f=document.getElementById('task_full_${cuid}_${tIdx}');if(f.style.display==='none'){f.style.display='block';s.style.display='none';this.textContent='▲ Réduire';}else{f.style.display='none';s.style.display='block';this.textContent='▼ Voir plus';}" style="background: #ff8f00; color: white; border: none; padding: 4px 10px; border-radius: 4px; font-size: 11px; cursor: pointer; margin-top: 6px;">▼ Voir plus</button>
+                                ` : ''}
+                            ` : ''}
+                        </div>
+                    `).join('')}
                 </div>`;
             }
 
             if (client.tasksOverdue.length > 0) {
-                html += `<div style="margin-bottom: 15px;">
-                    <h4 style="color: #d32f2f; margin-bottom: 8px;">⚠️ Tâches en Retard (${client.tasksOverdue.length})</h4>
-                    <ul style="margin: 0; padding-left: 20px;">
-                        ${client.tasksOverdue.map(t => `<li style="margin-bottom: 5px;"><strong>${Utils.escapeHtml(t.title || '')}</strong> <span style="color:#d32f2f;">(${t.daysOverdue || '?'}j)</span></li>`).join('')}
-                    </ul>
+                html += `<div style="background: linear-gradient(135deg, #ffebee 0%, #ffcdd2 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #d32f2f;">
+                    <div style="font-weight: 600; color: #c62828; margin-bottom: 10px; font-size: 14px;">⚠️ Tâches en retard (${client.tasksOverdue.length})</div>
+                    ${client.tasksOverdue.map(t => `
+                        <div style="background: white; border-radius: 6px; padding: 10px; margin-bottom: 6px;">
+                            <strong style="color: #333; font-size: 13px;">${Utils.escapeHtml(t.title)}</strong>
+                            <div style="color: #d32f2f; font-size: 11px; margin-top: 4px;">${t.daysOverdue}j de retard • → ${Utils.escapeHtml(t.assignedTo || 'N/A')}</div>
+                        </div>
+                    `).join('')}
                 </div>`;
             }
 
-            if (client.estimates.length > 0) {
-                html += `<div style="margin-bottom: 15px;">
-                    <h4 style="color: #0097a7; margin-bottom: 8px;">📋 Devis (${client.estimates.length})</h4>
-                    <ul style="margin: 0; padding-left: 20px;">
-                        ${client.estimates.map(e => `<li style="margin-bottom: 5px;">${e.action || ''} - ${Utils.escapeHtml(e.entityName || '')}</li>`).join('')}
-                    </ul>
+            if (client.estimates.length > 0 || client.policies.length > 0 || client.claims.length > 0) {
+                html += `<div style="background: linear-gradient(135deg, #f3e5f5 0%, #e1bee7 100%); border-radius: 10px; padding: 15px; border-left: 4px solid #7b1fa2;">
+                    <div style="font-weight: 600; color: #6a1b9a; margin-bottom: 10px; font-size: 14px;">📄 Documents (${client.estimates.length + client.policies.length + client.claims.length})</div>
+                    <div style="display: flex; flex-wrap: wrap; gap: 8px;">
+                        ${client.estimates.map(e => `<span style="background: white; color: #7b1fa2; padding: 6px 12px; border-radius: 6px; font-size: 12px;">📋 Devis ${e.entityId || ''}</span>`).join('')}
+                        ${client.policies.map(p => `<span style="background: white; color: #00796b; padding: 6px 12px; border-radius: 6px; font-size: 12px;">📄 Contrat ${p.entityId || ''}</span>`).join('')}
+                        ${client.claims.map(c => `<span style="background: white; color: #c62828; padding: 6px 12px; border-radius: 6px; font-size: 12px;">🚨 Sinistre ${c.entityId || ''}</span>`).join('')}
+                    </div>
                 </div>`;
             }
 
-            if (client.policies.length > 0) {
-                html += `<div style="margin-bottom: 15px;">
-                    <h4 style="color: #3f51b5; margin-bottom: 8px;">📄 Contrats (${client.policies.length})</h4>
-                    <ul style="margin: 0; padding-left: 20px;">
-                        ${client.policies.map(p => `<li style="margin-bottom: 5px;">${p.action || ''} - ${Utils.escapeHtml(p.entityName || '')}</li>`).join('')}
-                    </ul>
-                </div>`;
-            }
-
-            if (client.claims.length > 0) {
-                html += `<div style="margin-bottom: 15px;">
-                    <h4 style="color: #c2185b; margin-bottom: 8px;">🚨 Sinistres (${client.claims.length})</h4>
-                    <ul style="margin: 0; padding-left: 20px;">
-                        ${client.claims.map(c => `<li style="margin-bottom: 5px;">${c.action || ''} - ${Utils.escapeHtml(c.entityName || '')}</li>`).join('')}
-                    </ul>
-                </div>`;
-            }
-
+            html += '</div>';
             return html || '<p style="color: #999;">Aucune action</p>';
         }
     };
