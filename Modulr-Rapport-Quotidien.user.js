@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LTOA Modulr - Rapport Quotidien
 // @namespace    https://github.com/BiggerThanTheMall/tampermonkey-ltoa
-// @version      4.7.0
+// @version      4.7.5
 // @description  Génération automatique du rapport d’activité quotidien dans Modulr
 // @author       LTOA Assurances
 // @match        https://courtage.modulr.fr/*
@@ -13,6 +13,7 @@
 // @updateURL    https://raw.githubusercontent.com/BiggerThanTheMall/tampermonkey-ltoa/main/Modulr-Rapport-Quotidien.user.js
 // @downloadURL  https://raw.githubusercontent.com/BiggerThanTheMall/tampermonkey-ltoa/main/Modulr-Rapport-Quotidien.user.js
 // ==/UserScript==
+
 
 (function() {
     'use strict';
