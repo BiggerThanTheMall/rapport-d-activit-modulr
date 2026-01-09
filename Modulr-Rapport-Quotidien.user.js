@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LTOA Modulr - Rapport Quotidien
 // @namespace    https://github.com/BiggerThanTheMall/tampermonkey-ltoa
-// @version      4.7.7
+// @version      4.7.8
 // @description  Génération automatique du rapport d’activité quotidien dans Modulr
 // @author       LTOA Assurances
 // @match        https://courtage.modulr.fr/*
@@ -939,37 +939,34 @@
     };
 
    // ============================================
-    // COLLECTEUR D'EMAILS AFFECTÉS (CORRIGÉ v4.7.7)
+    // COLLECTEUR D'EMAILS AFFECTÉS (CORRIGÉ v4.7.8)
     // ============================================
-    // Parcourt les emails traités et cherche ceux affectés par l'utilisateur à la DATE DU RAPPORT
-    // L'info d'affectation est dans un <span class="hidden">Affecté à X par Y le DD/MM/YYYY</span>
     const EmailsAffectedCollector = {
         async collect(connectedUser, updateLoader) {
-            console.log('%c=== COLLECTE EMAILS AFFECTÉS (v4.7.7) ===', 'background: #4CAF50; color: white; padding: 5px;');
+            console.log('%c=== COLLECTE EMAILS AFFECTÉS (v4.7.8) ===', 'background: #4CAF50; color: white; padding: 5px;');
             console.log('Utilisateur connecté:', connectedUser);
             const results = [];
-            const reportDate = Utils.getTodayDate(); // Date du rapport
+            const reportDate = Utils.getTodayDate();
 
             console.log('Date du rapport:', reportDate);
 
             let currentPage = 1;
             let hasMorePages = true;
             let pagesWithoutMatch = 0;
-            const MAX_PAGES_WITHOUT_MATCH = 5; // Augmenté pour plus de fiabilité
+            const MAX_PAGES_WITHOUT_MATCH = 5;
 
             try {
                 while (hasMorePages && currentPage <= CONFIG.MAX_PAGES_TO_CHECK) {
                     updateLoader(`Emails affectés - Page ${currentPage}...`);
 
-                    // URL CORRIGÉE: show_treated_emails=1 (case "Voir les emails traités")
-                    const url = `https://courtage.modulr.fr/fr/scripts/emails/emails_list.php?email_page=${currentPage}&emails_filters%5Bshow_treated_emails%5D=1`;
+                    // URL CORRIGÉE: show_associated_emails=1
+                    const url = `https://courtage.modulr.fr/fr/scripts/emails/emails_list.php?email_page=${currentPage}&emails_filters%5Bshow_associated_emails%5D=1`;
 
                     console.log(`%c[Page ${currentPage}] GET: ${url}`, 'color: #2196F3');
 
                     const html = await Utils.fetchPage(url);
                     const doc = Utils.parseHTML(html);
 
-                    // Chercher les lignes d'emails
                     const emailRows = doc.querySelectorAll('tr[id^="e_main_"]');
                     console.log(`[Page ${currentPage}] ${emailRows.length} lignes d'emails`);
 
@@ -983,10 +980,6 @@
                     for (const row of emailRows) {
                         const emailId = row.id.replace('e_main_', '');
 
-                        // ========================================
-                        // MÉTHODE PRINCIPALE: Chercher dans span.hidden
-                        // Format: "Affecté à NOM, Prénom  par NOM PRENOM le DD/MM/YYYY"
-                        // ========================================
                         let affectedTo = '';
                         let affectedDate = '';
                         let affectedBy = '';
@@ -994,44 +987,26 @@
                         const hiddenSpans = row.querySelectorAll('span.hidden');
                         for (const span of hiddenSpans) {
                             const txt = span.textContent.trim();
-                            // Regex souple pour capturer l'info d'affectation
                             const match = txt.match(/Affecté\s+à\s+(.+?)\s+par\s+(.+?)\s+le\s+(\d{2}\/\d{2}\/\d{4})/i);
                             if (match) {
                                 affectedTo = match[1].trim();
                                 affectedBy = match[2].trim();
                                 affectedDate = match[3];
-                                console.log(`  [Email ${emailId}] ✓ Trouvé: "${affectedBy}" → "${affectedTo}" le ${affectedDate}`);
                                 break;
                             }
                         }
 
-                        // Pas d'info d'affectation = email non traité, skip
-                        if (!affectedBy) {
-                            continue;
-                        }
+                        if (!affectedBy) continue;
 
-                        // Vérifier si la date d'affectation = date du rapport
-                        if (affectedDate !== reportDate) {
-                            continue;
-                        }
+                        // Filtre par date
+                        if (affectedDate !== reportDate) continue;
 
-                        // ========================================
-                        // Vérifier si affecté PAR l'utilisateur connecté
-                        // ========================================
+                        // Filtre par utilisateur
                         const userLower = connectedUser.toLowerCase().trim();
                         const byLower = affectedBy.toLowerCase().trim();
 
-                        let isMatch = false;
-
-                        // Match exact
-                        if (byLower === userLower) {
-                            isMatch = true;
-                        }
-                        // Match par inclusion
-                        if (!isMatch && (byLower.includes(userLower) || userLower.includes(byLower))) {
-                            isMatch = true;
-                        }
-                        // Match par parties du nom (prénom OU nom)
+                        let isMatch = (byLower === userLower);
+                        if (!isMatch) isMatch = byLower.includes(userLower) || userLower.includes(byLower);
                         if (!isMatch) {
                             const byParts = byLower.split(/[\s,]+/).filter(p => p.length > 2);
                             const userParts = userLower.split(/[\s,]+/).filter(p => p.length > 2);
@@ -1046,99 +1021,51 @@
                             }
                         }
 
-                        if (!isMatch) {
-                            console.log(`    "${affectedBy}" ≠ "${connectedUser}", skip`);
-                            continue;
-                        }
+                        if (!isMatch) continue;
 
-                        // ========================================
-                        // MATCH ! Collecter les infos de l'email
-                        // ========================================
                         foundMatchOnPage = true;
 
-                        // Date/heure de réception
                         const dateTimeSpan = row.querySelector('span[id^="e_datetime_"]');
-                        let emailReceivedDate = '';
                         let emailTime = '';
                         if (dateTimeSpan) {
-                            const dtText = dateTimeSpan.textContent.trim();
-                            const dateMatch = dtText.match(/(\d{2}\/\d{2}\/\d{4})/);
-                            if (dateMatch) emailReceivedDate = dateMatch[1];
-                            const timeMatch = dtText.match(/(\d{1,2}:\d{2})/);
+                            const timeMatch = dateTimeSpan.textContent.match(/(\d{1,2}:\d{2})/);
                             if (timeMatch) emailTime = timeMatch[1];
                         }
 
-                        // Expéditeur (nom affiché)
                         const fromSpan = row.querySelector('span[id^="e_from_"]');
                         const fromText = fromSpan ? fromSpan.textContent.trim() : 'N/A';
 
-                        // Email de l'expéditeur (dans span.hidden ou input)
                         let fromEmail = '';
                         const emailInput = row.querySelector('input.association_email_email');
-                        if (emailInput) {
-                            fromEmail = emailInput.value;
-                        } else {
-                            // Chercher dans les span.hidden (souvent l'email est là)
-                            for (const span of hiddenSpans) {
-                                const txt = span.textContent.trim();
-                                if (txt.includes('@') && !txt.includes('Affecté')) {
-                                    fromEmail = txt;
-                                    break;
-                                }
-                            }
-                        }
+                        if (emailInput) fromEmail = emailInput.value;
 
-                        // Objet de l'email
                         let subject = 'N/A';
-                        // D'abord essayer dans la ligne de détails
-                        const detailsRow = doc.querySelector(`#e_details_${emailId}`);
-                        if (detailsRow) {
-                            const subjectTd = detailsRow.querySelector('td[id^="e_subject_"]');
-                            if (subjectTd) subject = subjectTd.textContent.trim();
-                        }
-                        // Sinon dans l'input hidden
-                        if (subject === 'N/A') {
-                            const subjectInput = row.querySelector('input.association_email_subject');
-                            if (subjectInput && subjectInput.value) {
-                                subject = subjectInput.value;
-                            }
-                        }
+                        const subjectInput = row.querySelector('input.association_email_subject');
+                        if (subjectInput && subjectInput.value) subject = subjectInput.value;
 
-                        // Pièce jointe
-                        const hasAttachment = !!row.querySelector('.fa-paperclip');
-
-                        // Éviter les doublons
                         if (!results.find(r => r.id === emailId)) {
                             results.push({
                                 id: emailId,
                                 date: affectedDate,
-                                receivedDate: emailReceivedDate,
                                 time: emailTime,
                                 from: fromText,
                                 fromEmail: fromEmail,
                                 subject: subject,
                                 affectedTo: affectedTo,
-                                hasAttachment: hasAttachment
+                                hasAttachment: !!row.querySelector('.fa-paperclip')
                             });
-
-                            console.log(`%c  ✓ COLLECTÉ: Email ${emailId} - "${subject.substring(0, 50)}..." affecté à ${affectedTo}`, 'color: #4CAF50; font-weight: bold');
+                            console.log(`%c  ✓ COLLECTÉ: ${emailId} - "${subject.substring(0, 40)}..." → ${affectedTo}`, 'color: #4CAF50; font-weight: bold');
                         }
                     }
 
-                    // Logique d'arrêt
                     if (foundMatchOnPage) {
                         pagesWithoutMatch = 0;
                     } else {
                         pagesWithoutMatch++;
-                        console.log(`  Page ${currentPage}: pas de match (${pagesWithoutMatch}/${MAX_PAGES_WITHOUT_MATCH})`);
                     }
 
-                    if (pagesWithoutMatch >= MAX_PAGES_WITHOUT_MATCH) {
-                        console.log(`Arrêt après ${MAX_PAGES_WITHOUT_MATCH} pages sans match`);
-                        break;
-                    }
+                    if (pagesWithoutMatch >= MAX_PAGES_WITHOUT_MATCH) break;
 
-                    // Pagination
                     const nextPageLink = doc.querySelector(`a[href*="email_page=${currentPage + 1}"]`);
                     if (nextPageLink) {
                         currentPage++;
@@ -1148,7 +1075,7 @@
                     }
                 }
 
-                console.log(`%c=== RÉSULTAT: ${results.length} emails affectés par ${connectedUser} le ${reportDate} ===`, 'background: #4CAF50; color: white; padding: 5px;');
+                console.log(`%c=== RÉSULTAT: ${results.length} emails ===`, 'background: #4CAF50; color: white; padding: 5px;');
             } catch (error) {
                 console.error('Erreur collecte emails affectés:', error);
             }
