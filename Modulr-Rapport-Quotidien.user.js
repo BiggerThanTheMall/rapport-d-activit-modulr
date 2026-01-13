@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         LTOA Modulr - Rapport Quotidien
 // @namespace    https://github.com/BiggerThanTheMall/tampermonkey-ltoa
-// @version      4.7.8
+// @version      4.7.9
 // @description  Génération automatique du rapport d’activité quotidien dans Modulr
 // @author       LTOA Assurances
 // @match        https://courtage.modulr.fr/*
@@ -938,44 +938,55 @@
         }
     };
 
-   // ============================================
-    // COLLECTEUR D'EMAILS AFFECTÉS (CORRIGÉ v4.7.8)
+  // ============================================
+    // COLLECTEUR D'EMAILS AFFECTÉS (v4.8.2 - POST+GET)
     // ============================================
     const EmailsAffectedCollector = {
         async collect(connectedUser, updateLoader) {
-            console.log('%c=== COLLECTE EMAILS AFFECTÉS (v4.7.8) ===', 'background: #4CAF50; color: white; padding: 5px;');
+            console.log('%c=== COLLECTE EMAILS AFFECTÉS (v4.8.2) ===', 'background: #4CAF50; color: white; padding: 5px;');
             console.log('Utilisateur connecté:', connectedUser);
             const results = [];
             const reportDate = Utils.getTodayDate();
-
             console.log('Date du rapport:', reportDate);
 
-            let currentPage = 1;
-            let hasMorePages = true;
-            let pagesWithoutMatch = 0;
-            const MAX_PAGES_WITHOUT_MATCH = 5;
+            const MAX_PAGES = 20;
 
             try {
-                while (hasMorePages && currentPage <= CONFIG.MAX_PAGES_TO_CHECK) {
-                    updateLoader(`Emails affectés - Page ${currentPage}...`);
+                // 1. POST pour activer le filtre
+                updateLoader('Activation filtre emails...');
+                await fetch('https://courtage.modulr.fr/fr/scripts/emails/emails_list.php', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                    body: 'action=filter&emails_filters%5Bshow_associated_emails%5D=1&mailbox_id=all',
+                    credentials: 'include'
+                });
+                console.log('Filtre activé');
 
-                    // URL CORRIGÉE: show_associated_emails=1
-                    const url = `https://courtage.modulr.fr/fr/scripts/emails/emails_list.php?email_page=${currentPage}&emails_filters%5Bshow_associated_emails%5D=1`;
+                // 2. GET toutes les pages en parallèle
+                updateLoader(`Emails affectés - Pages 1-${MAX_PAGES}...`);
+                
+                const promises = [];
+                for (let page = 1; page <= MAX_PAGES; page++) {
+                    promises.push(
+                        fetch(`https://courtage.modulr.fr/fr/scripts/emails/emails_list.php?email_page=${page}`, {
+                            credentials: 'include'
+                        })
+                        .then(r => r.text())
+                        .then(html => ({ page, html }))
+                        .catch(err => ({ page, html: '', error: err }))
+                    );
+                }
 
-                    console.log(`%c[Page ${currentPage}] GET: ${url}`, 'color: #2196F3');
+                const responses = await Promise.all(promises);
 
-                    const html = await Utils.fetchPage(url);
+                // 3. Traiter les résultats (triés par page)
+                responses.sort((a, b) => a.page - b.page);
+                
+                for (const { page, html, error } of responses) {
+                    if (error || !html) continue;
+
                     const doc = Utils.parseHTML(html);
-
                     const emailRows = doc.querySelectorAll('tr[id^="e_main_"]');
-                    console.log(`[Page ${currentPage}] ${emailRows.length} lignes d'emails`);
-
-                    if (emailRows.length === 0) {
-                        console.log('Aucune ligne trouvée, fin');
-                        break;
-                    }
-
-                    let foundMatchOnPage = false;
 
                     for (const row of emailRows) {
                         const emailId = row.id.replace('e_main_', '');
@@ -997,8 +1008,6 @@
                         }
 
                         if (!affectedBy) continue;
-
-                        // Filtre par date
                         if (affectedDate !== reportDate) continue;
 
                         // Filtre par utilisateur
@@ -1022,8 +1031,6 @@
                         }
 
                         if (!isMatch) continue;
-
-                        foundMatchOnPage = true;
 
                         const dateTimeSpan = row.querySelector('span[id^="e_datetime_"]');
                         let emailTime = '';
@@ -1054,24 +1061,8 @@
                                 affectedTo: affectedTo,
                                 hasAttachment: !!row.querySelector('.fa-paperclip')
                             });
-                            console.log(`%c  ✓ COLLECTÉ: ${emailId} - "${subject.substring(0, 40)}..." → ${affectedTo}`, 'color: #4CAF50; font-weight: bold');
+                            console.log(`%c  ✓ Page ${page}: ${emailId} → ${affectedTo}`, 'color: #4CAF50');
                         }
-                    }
-
-                    if (foundMatchOnPage) {
-                        pagesWithoutMatch = 0;
-                    } else {
-                        pagesWithoutMatch++;
-                    }
-
-                    if (pagesWithoutMatch >= MAX_PAGES_WITHOUT_MATCH) break;
-
-                    const nextPageLink = doc.querySelector(`a[href*="email_page=${currentPage + 1}"]`);
-                    if (nextPageLink) {
-                        currentPage++;
-                        await Utils.delay(CONFIG.DELAY_BETWEEN_REQUESTS);
-                    } else {
-                        hasMorePages = false;
                     }
                 }
 
