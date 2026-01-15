@@ -1017,18 +1017,20 @@
                         let isMatch = (byLower === userLower);
                         if (!isMatch) isMatch = byLower.includes(userLower) || userLower.includes(byLower);
                         if (!isMatch) {
-                            const byParts = byLower.split(/[\s,]+/).filter(p => p.length > 2);
-                            const userParts = userLower.split(/[\s,]+/).filter(p => p.length > 2);
-                            for (const bp of byParts) {
-                                for (const up of userParts) {
-                                    if (bp === up || bp.includes(up) || up.includes(bp)) {
-                                        isMatch = true;
-                                        break;
-                                    }
-                                }
-                                if (isMatch) break;
-                            }
-                        }
+    const byParts = byLower.split(/[\s,]+/).filter(p => p.length > 2);
+    const userParts = userLower.split(/[\s,]+/).filter(p => p.length > 2);
+    
+    // Exiger que le PRÉNOM corresponde (pas juste le nom de famille)
+    if (byParts.length > 0 && userParts.length > 0) {
+        const byFirstName = byParts[0];
+        const userFirstName = userParts[0];
+        if (byFirstName === userFirstName || 
+            byFirstName.includes(userFirstName) || 
+            userFirstName.includes(byFirstName)) {
+            isMatch = true;
+        }
+    }
+}
 
                         if (!isMatch) continue;
 
